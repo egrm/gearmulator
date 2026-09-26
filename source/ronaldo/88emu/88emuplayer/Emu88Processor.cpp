@@ -204,7 +204,10 @@ namespace emu88Player
 	{
 		emu88Lib::BootOptions boot;
 		boot.factoryReset = m_config->getBoolValue(g_factoryResetOnLoadKey, boot.factoryReset);
-		boot.fastBoot = m_config->getBoolValue(g_fastBootKey, boot.fastBoot);
+		// HardwareDevice's existing offline boot runs before the engine accepts MIDI.
+		// Hosts can send the first note immediately; standalone animation preferences
+		// must not leave a hosted board in its power-on MIDI delay.
+		boot.fastBoot = isHosted() || m_config->getBoolValue(g_fastBootKey, boot.fastBoot);
 		return boot;
 	}
 

@@ -65,6 +65,33 @@ namespace
 		processor.releaseResources();
 		return result;
 	}
+
+	void firstNoteAfterConstruction()
+	{
+		// The standalone may deliberately show its boot animation. A hosted instance
+		// must still accept the first event immediately after prepareToPlay.
+		{
+			auto config = emu88Player::Processor::createConfig(emu88Player::defaultDataFolder());
+			config->setValue("fastBoot", false);
+			CHECK(config->saveIfNeeded());
+		}
+		juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
+		emu88Player::Processor processor;
+		processor.setRateAndBufferSizeDetails(32000.0, 256);
+		processor.prepareToPlay(32000.0, 256);
+		juce::AudioBuffer<float> audio(2, 256);
+		juce::MidiBuffer midi;
+		midi.addEvent(juce::MidiMessage::noteOn(1, 60, juce::uint8(100)), 0);
+		float peak = 0;
+		for(unsigned block = 0; block < 16; ++block)
+		{
+			processor.processBlock(audio, midi);
+			midi.clear();
+			peak = std::max(peak, audio.getMagnitude(0, audio.getNumSamples()));
+		}
+		CHECK(peak > 0.01f);
+		processor.releaseResources();
+	}
 }
 
 int main()
@@ -89,6 +116,7 @@ int main()
 	const auto stopped = render(true);
 	CHECK(reference == stopped);
 	std::cout << "Compared " << reference.size() << " samples after host Stop against All Sound Off\n";
+	firstNoteAfterConstruction();
 	emu88Player::standaloneLaunch = nullptr;
 	return test::finish("88emuTransport");
 }
