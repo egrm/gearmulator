@@ -13,6 +13,7 @@
 // derives it from `now` when accessed rather than from ticks.
 #pragma once
 #include <algorithm>
+#include <utility>
 #include <vector>
 
 #include "common/types.hpp"
@@ -73,6 +74,28 @@ class Scheduler {
   }
   bool empty() const { return heap_.empty(); }
   size_t pending() const { return heap_.size(); }
+
+  // Copy execution timing without invoking callbacks or re-registering events:
+  // schedule() would change the (when,id) ordering and notify the CPU hook.
+  // rebind returns optional<void*>; an unknown live context rejects the entire
+  // copy. The destination keeps its own earlier-event CPU hook. Both schedulers
+  // must be exclusively owned at an instruction boundary, outside run_due().
+  template<class Rebind>
+  bool copy_pending_from(const Scheduler& source, Rebind&& rebind) {
+    auto pending = source.heap_;
+    for (auto& event : pending) {
+      if (!event.fn) {
+        event.ctx = nullptr;
+        continue;
+      }
+      const auto context = rebind(event.ctx);
+      if (!context) return false;
+      event.ctx = *context;
+    }
+    heap_ = std::move(pending);
+    next_id_ = source.next_id_;
+    return true;
+  }
 
  private:
   struct Event {

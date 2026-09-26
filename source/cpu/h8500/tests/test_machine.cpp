@@ -1,5 +1,6 @@
 // Machine-level tests: bus devices, scheduler, event-driven interrupts.
 #include <vector>
+#include <optional>
 
 #include "cpu/h8500/machine.hpp"
 #include "common/test_util.hpp"
@@ -84,6 +85,60 @@ void test_mmio_device() {
   CHECK_EQ(other.read16(0x1234), 0xFFFFu);
 }
 
+// A private execution clone must preserve deadlines and same-time event order,
+// while no callback may retain an address into its source machine.
+void test_scheduler_copy_isolation() {
+  emu::Scheduler source, destination;
+  std::vector<u64> original, copied;
+  auto first = [](void* ctx, u64 when, u64 now) {
+    auto& out = *static_cast<std::vector<u64>*>(ctx);
+    out.insert(out.end(), {1, when, now});
+  };
+  auto second = [](void* ctx, u64 when, u64 now) {
+    auto& out = *static_cast<std::vector<u64>*>(ctx);
+    out.insert(out.end(), {2, when, now});
+  };
+  source.schedule(100, first, &original);
+  source.schedule(100, second, &original);
+  const auto cancelled = source.schedule(200, second, &original);
+  source.cancel(cancelled);
+  source.schedule(300, first, &original);
+  unsigned originalHook = 0, copiedHook = 0;
+  auto earlier = [](void* ctx, u64) { ++*static_cast<unsigned*>(ctx); };
+  source.set_earlier_hook(earlier, &originalHook);
+  destination.set_earlier_hook(earlier, &copiedHook);
+  auto rebind = [&](void* ctx) -> std::optional<void*> {
+    if(ctx == &original) return &copied;
+    return std::nullopt;
+  };
+  CHECK(destination.copy_pending_from(source, rebind));
+  CHECK_EQ(originalHook, 0u);
+  CHECK_EQ(copiedHook, 0u);
+  destination.run_due(150);
+  CHECK(original.empty());
+  CHECK((copied == std::vector<u64>{1, 100, 150, 2, 100, 150}));
+  const auto newDestinationId = destination.schedule(250, second, &copied);
+  const auto newSourceId = source.schedule(250, second, &original);
+  CHECK_EQ(newDestinationId, newSourceId);
+  CHECK_EQ(copiedHook, 1u);
+  CHECK_EQ(originalHook, 0u);
+  destination.run_due(300);
+  source.run_due(150);
+  source.run_due(300);
+  CHECK(original == copied);
+
+  // Unknown ownership fails before changing the destination heap or ID sequence.
+  emu::Scheduler rejected;
+  std::vector<u64> retained;
+  rejected.schedule(50, first, &retained);
+  source.schedule(400, first, &original);
+  CHECK(!rejected.copy_pending_from(source, [](void*) -> std::optional<void*> { return {}; }));
+  CHECK_EQ(rejected.next_time(), 50u);
+  CHECK_EQ(rejected.schedule(60, second, &retained), 2u);
+  rejected.run_due(100);
+  CHECK((retained == std::vector<u64>{1, 50, 100, 2, 60, 100}));
+}
+
 // A timer event asserts IRQ0 at state 1001.  The CPU must take it at the end
 // of the instruction in flight, and the scheduler must observe exact time.
 // The handler acknowledges by writing a register that deasserts the request.
@@ -150,6 +205,7 @@ void test_event_slicing() {
 
 int main() {
   test_scheduler_order_and_cancel();
+  test_scheduler_copy_isolation();
   test_mmio_device();
   test_timed_interrupt();
   test_event_slicing();
