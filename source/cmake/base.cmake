@@ -7,6 +7,10 @@ endif()
 set(TUS_BIN_DIR "${CMAKE_SOURCE_DIR}/bin")
 set(TUS_CAN_RUN_BUILT_BINARIES ON)
 
+# Optional isolated output root for development while a host has a released DLL
+# loaded. Keep the upstream default when no override was requested.
+set(TUS_BINARY_OUTPUT_ROOT "" CACHE PATH "Optional root for isolated plugin/tool build outputs")
+
 if(MSVC)
 	# https://cmake.org/cmake/help/latest/variable/CMAKE_MSVC_RUNTIME_LIBRARY.html#variable:CMAKE_MSVC_RUNTIME_LIBRARY
 	cmake_policy(SET CMP0091 NEW)
@@ -153,6 +157,11 @@ else()
 		string(APPEND CMAKE_CXX_FLAGS " -march=armv8.2-a")
 		string(APPEND CMAKE_C_FLAGS " -march=armv8.2-a")
 	endif()
+endif()
+
+# Apply after platform defaults, including the Windows ARM64 output directory.
+if(TUS_BINARY_OUTPUT_ROOT)
+  set(TUS_BIN_DIR "${TUS_BINARY_OUTPUT_ROOT}")
 endif()
 
 message( STATUS "Architecture: ${ARCHITECTURE}" )
