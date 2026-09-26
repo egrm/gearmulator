@@ -49,7 +49,8 @@ namespace emu88Lib
 	Sc88::Sc88(std::vector<uint8_t> _firmware, std::vector<uint8_t> _waveRom,
 	           const Model _model, const bool _factoryReset)
 		: m_rom(std::move(_firmware))
-		, m_waveRom(std::move(_waveRom))
+		, m_firmwareHash(m_rom)
+		, m_waveRom(std::make_shared<const std::vector<uint8_t>>(std::move(_waveRom)))
 		, m_model(_model)
 		, m_p5dr(g_p5drStraps)
 	{
@@ -58,11 +59,7 @@ namespace emu88Lib
 			std::fprintf(stderr, "Sc88: firmware must be %u bytes, got %zu\n", RomSize, m_rom.size());
 			return;
 		}
-		constexpr size_t waveChipSize = 0x200000;
-		const auto waveChips = std::min(m_waveRom.size() / waveChipSize, xpLib::XP::nWaveChipSelects);
-		for(size_t chip = 0; chip < waveChips; ++chip)
-			m_xp.mapWaveRom(chip, m_waveRom.data() + chip * waveChipSize, waveChipSize,
-			                       xpLib::XP::PhysicalWaveRomWidth::bits16);
+		mapWaveRom();
 
 		// Bus map + chip host hooks.
 		wireChip();
@@ -79,6 +76,99 @@ namespace emu88Lib
 		powerCycle();
 		if(_factoryReset && m_model != Model::Xpgs)
 			runFactoryReset();
+	}
+
+	void Sc88::mapWaveRom()
+	{
+		// Registry WaveRom::ChipSize is the SC-88 family's physical chip size.
+		const auto waveChips = std::min(m_waveRom->size() / WaveRom::ChipSize, xpLib::XP::nWaveChipSelects);
+		for(size_t chip{}; chip < waveChips; ++chip)
+			m_xp.mapWaveRom(chip, m_waveRom->data() + chip * WaveRom::ChipSize, WaveRom::ChipSize,
+			               xpLib::XP::PhysicalWaveRomWidth::bits16);
+	}
+
+	Sc88::Sc88(std::vector<uint8_t> firmware, baseLib::MD5 fingerprint,
+	           std::shared_ptr<const std::vector<uint8_t>> waves, const Model model, ExecutionCloneTag)
+		: m_rom(std::move(firmware)), m_firmwareHash(fingerprint), m_waveRom(std::move(waves)),
+		  m_model(model), m_p5dr(g_p5drStraps)
+	{
+		wireChip();
+		mapWaveRom();
+		m_xp.setInterruptCallback([this](bool level) { requestIrq(IrqXp, level); });
+		m_captureShell = true;
+	}
+
+	std::function<std::unique_ptr<Sc88>()> Sc88::prepareExecutionClone() const
+	{
+		if(!m_valid || (m_model != Model::Sc88 && m_model != Model::Sc88VL)) return {};
+		return [firmware = m_rom, fingerprint = m_firmwareHash, waves = m_waveRom, model = m_model]() mutable
+		{
+			if(!waves) return std::unique_ptr<Sc88>{};
+			return std::unique_ptr<Sc88>(new Sc88(std::move(firmware), fingerprint, std::move(waves), model, ExecutionCloneTag{}));
+		};
+	}
+
+	bool Sc88::acceptsExecutionFrom(const Sc88& source) const
+	{
+		return m_captureShell && source.m_valid && !source.m_machine.cpu().in_slice() &&
+		       m_model == source.m_model && m_firmwareHash == source.m_firmwareHash &&
+		       m_waveRom == source.m_waveRom;
+	}
+
+	bool Sc88::copyExecutionFrom(const Sc88& source)
+	{
+		if(!acceptsExecutionFrom(source)) return false;
+		m_captureShell = false;
+		m_xp.copyRuntimeFrom(source.m_xp);
+		m_subMcu.copyRuntimeFrom(source.m_subMcu);
+		m_sram = source.m_sram;
+		m_lcd = source.m_lcd;
+		m_lcdEnabled = source.m_lcdEnabled;
+		m_valid = source.m_valid;
+		m_samplesRendered = source.m_samplesRendered;
+		m_cycleTarget = source.m_cycleTarget;
+		m_cycleFrac = source.m_cycleFrac;
+		m_buttons = source.m_buttons;
+		m_scanColumn = source.m_scanColumn;
+		m_panelCtrl = source.m_panelCtrl;
+		m_leds = source.m_leds;
+		m_p5dr = source.m_p5dr;
+		m_analog = source.m_analog;
+		m_gaInt = source.m_gaInt;
+		m_gaIrqMask = source.m_gaIrqMask;
+		m_gaIntTrigger = source.m_gaIntTrigger;
+		m_lcdInstr = source.m_lcdInstr;
+		m_lcdStaged = source.m_lcdStaged;
+		m_lcdBuffer = source.m_lcdBuffer;
+		m_gaLcdEvent = source.m_gaLcdEvent;
+		m_subMcuRam = source.m_subMcuRam;
+		m_subMcuStarted = source.m_subMcuStarted;
+		m_midiInQueue = source.m_midiInQueue;
+		m_midiMailbox = source.m_midiMailbox;
+		m_midiMailboxFull = source.m_midiMailboxFull;
+		m_midiWireDelay = source.m_midiWireDelay;
+		m_midiWireFrac = source.m_midiWireFrac;
+		m_xpEnabled = source.m_xpEnabled;
+		// LCD observers belong to the host's live instance, never its private clone.
+		m_lcd.setChangeCallback({});
+		m_lcd.setCgRamChangeCallback({});
+		m_lcd.setCursorChangeCallback({});
+		return m_machine.copy_runtime_from_510(source.m_machine,
+			[this, &source](void* owner) -> std::optional<void*>
+			{
+				if(owner == &source) return this;
+				return std::nullopt;
+			});
+	}
+
+	std::unique_ptr<Sc88> Sc88::cloneExecution() const
+	{
+		if(!m_valid || m_machine.cpu().in_slice()) return {};
+		auto prepare = prepareExecutionClone();
+		if(!prepare) return {};
+		auto result = prepare();
+		if(!result || !result->copyExecutionFrom(*this)) return {};
+		return result;
 	}
 
 	void Sc88::powerCycle()

@@ -50,6 +50,7 @@ namespace emu88Lib
 	//   page 0xF                 sub-MCU (0x00xx) and gate array (0xC1xx)
 	class Sc88
 	{
+		friend struct Sc88ExecutionProbe;
 	public:
 
 		// External interrupt pins as this board wires them.
@@ -117,6 +118,14 @@ namespace emu88Lib
 		Sc88& operator=(const Sc88&) = delete;
 
 		bool isValid() const { return m_valid; }
+
+		// Private execution continuation for settings resolution, not a save image.
+		// Factory inputs own immutable assets; copy requires exclusive source access
+		// at a completed native sample. XP-GS's distinct serial path is unsupported.
+		std::function<std::unique_ptr<Sc88>()> prepareExecutionClone() const;
+		bool acceptsExecutionFrom(const Sc88& source) const;
+		bool copyExecutionFrom(const Sc88& source);
+		std::unique_ptr<Sc88> cloneExecution() const;
 
 		// ---- Audio ----
 		// Advance the board by exactly one audio frame and return the stereo
@@ -279,12 +288,20 @@ namespace emu88Lib
 		// Set up the bus map and the chip's host hooks. Runs once, from the
 		// constructor.
 		void wireChip();
+		void mapWaveRom();
+	private:
+		struct ExecutionCloneTag {};
+		Sc88(std::vector<uint8_t> firmware, baseLib::MD5 fingerprint,
+		     std::shared_ptr<const std::vector<uint8_t>> waves, Model model, ExecutionCloneTag);
+		bool m_captureShell = false;
+	protected:
 		// One audio frame's CPU budget, stepped instruction by instruction so
 
 		// ---- Storage ----
 		std::vector<uint8_t> m_rom;
+		baseLib::MD5 m_firmwareHash;
 		std::vector<uint8_t> m_sram = std::vector<uint8_t>(SramSize, 0);
-		std::vector<uint8_t> m_waveRom;
+		std::shared_ptr<const std::vector<uint8_t>> m_waveRom;
 
 		xpLib::XP m_xp;
 		bool m_xpEnabled = true;
