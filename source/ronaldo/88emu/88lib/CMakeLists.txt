@@ -126,6 +126,10 @@ if(BUILD_TESTING)
 	target_link_libraries(sc88pro_state_probe PRIVATE 88lib)
 	set_property(TARGET sc88pro_state_probe PROPERTY FOLDER "Ronaldo/tests")
 
+	add_executable(sc88_submcu_audit ${CMAKE_SOURCE_DIR}/tools/sc88_submcu_audit.cpp)
+	target_link_libraries(sc88_submcu_audit PRIVATE 88lib)
+	set_property(TARGET sc88_submcu_audit PROPERTY FOLDER "Ronaldo/tests")
+
 	add_executable(laBoard_test tests/laBoard_test.cpp)
 	target_link_libraries(laBoard_test PRIVATE 88lib)
 	set_property(TARGET laBoard_test PROPERTY FOLDER "Ronaldo/tests")

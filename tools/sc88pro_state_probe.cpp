@@ -77,6 +77,7 @@ static bool journalOrderingFixture = false;
 static bool executionCloneFixture = false;
 static bool cloneJournalFixture = false;
 static bool cloneOrderingFixture = false;
+static bool panelRecallFixture = false;
 
 // Test stimuli for receive-state fields identified in the installed ROM's MIDI handlers.
 static const std::array<std::array<uint8_t,3>, 16> extraControllerEvents = {{
@@ -101,19 +102,19 @@ struct Probe : Sc88Pro
     using Sc88Pro::extWrite8;
 };
 
-static void run(Probe& board, unsigned samples)
+static void run(Sc88Pro& board, unsigned samples)
 {
     while(samples--) board.renderSample();
 }
 
-static void screen(Probe& board, const char* label)
+static void screen(Sc88Pro& board, const char* label)
 {
     std::cout << label << " lcd=";
     for(auto byte : board.lcd().getDdRam()) std::cout << (byte >= 32 && byte < 127 ? char(byte) : '.');
     std::cout << " leds=" << board.leds() << '\n' << std::flush;
 }
 
-static void press(Probe& board, uint32_t buttons)
+static void press(Sc88Pro& board, uint32_t buttons)
 {
     // Same hold and gap durations as Sc88Pro::runFactoryReset, measured in native samples.
     board.setButtons(buttons); run(board, 3200);
@@ -143,7 +144,7 @@ struct Packet
     unsigned sample;
 };
 
-static std::vector<Packet> dump(Probe& board)
+static std::vector<Packet> dump(Sc88Pro& board)
 {
     std::vector<synthLib::SMidiEvent> output;
     board.readMidiOut(output); output.clear();
@@ -549,6 +550,66 @@ static int testPanelClone(const std::vector<uint8_t>& rom, const std::vector<uin
     return allEqual ? 0 : 1;
 }
 
+static int testPanelRecall(const std::vector<uint8_t>& rom, const std::vector<uint8_t>& waves)
+{
+    bool equal = true;
+    for(unsigned scenario = 0; scenario < 4; ++scenario)
+    {
+        auto live = std::make_unique<Probe>(rom, waves);
+        run(*live, 32000 * 10);
+        // A2 and B2 exercise both part and group selection through actual keys.
+        if(scenario >= 2)
+            press(*live, (uint32_t{1} << unsigned(Sc88ProButton::InstAll)) |
+                         (uint32_t{1} << unsigned(Sc88ProButton::PartL)));
+        press(*live, uint32_t{1} << unsigned(Sc88ProButton::PartR));
+        if(scenario & 1) press(*live, uint32_t{1} << unsigned(Sc88ProButton::UserInst));
+        if(ramWord(*live, 0x4d78) != (scenario < 2 ? 1u : 17u) ||
+           Sc88ProSettingsProbe::read(*live, 0x4b47) != ((scenario & 1) ? 7 : 0))
+            throw std::runtime_error("panel recall fixture did not select its requested part/page");
+        // A diagnostic ceiling, not a production scheduling/readiness constant.
+        unsigned boundarySamples = 0;
+        while(!Sc88ProSettings::isCaptureBoundary(*live, false) && boundarySamples++ < g_sampleRate)
+            live->renderSample();
+        if(!Sc88ProSettings::isCaptureBoundary(*live, false))
+            throw std::runtime_error("panel recall fixture did not reach capture boundary");
+        std::vector<uint8_t> captured;
+        if(Sc88ProSettings::capture(*live, captured) != Sc88ProSettings::Result::Success)
+            throw std::runtime_error("panel recall capture failed");
+        auto restored = std::make_unique<Probe>(rom, waves, false);
+        if(Sc88ProSettings::restore(*restored, captured) != Sc88ProSettings::Result::Success)
+            throw std::runtime_error("panel recall restore failed");
+        std::cout << "panel-recall-scenario=" << scenario << '\n';
+        screen(*live, "original-context"); screen(*restored, "restored-context");
+        for(unsigned address : {0x4b44,0x4b45,0x4b46,0x4b47,0x4b48,0x4b49,0x4d78,0x4d79})
+            std::cout << std::hex << address << '=' << unsigned(captured[address]) << '/' << unsigned(Sc88ProSettingsProbe::read(*restored,address)) << ' ';
+        std::cout << std::dec << '\n';
+        equal &= live->lcd().getDdRam() == restored->lcd().getDdRam();
+        {
+            // Dump isolated exact clones before the next edit: otherwise that edit
+            // could hide a restore-side parameter mutation by overwriting its value.
+            auto before = live->cloneExecution();
+            auto after = restored->cloneExecution();
+            if(Sc88ProSettingsProbe::read(*before, 0x4b47) == 7)
+                press(*before, uint32_t{1} << unsigned(Sc88ProButton::UserInst));
+            if(Sc88ProSettingsProbe::read(*after, 0x4b47) == 7)
+                press(*after, uint32_t{1} << unsigned(Sc88ProButton::UserInst));
+            equal &= compare(dump(*before), dump(*after), "panel-navigation-parameter-invariance");
+        }
+        press(*live, uint32_t{1} << unsigned(Sc88ProButton::LevelR));
+        press(*restored, uint32_t{1} << unsigned(Sc88ProButton::LevelR));
+        screen(*live, "original-next-click"); screen(*restored, "restored-next-click");
+        equal &= live->lcd().getDdRam() == restored->lcd().getDdRam();
+        // Exit only when each board is actually in UserInst, so the negative
+        // control can still produce its independent ALL dump after losing context.
+        if(Sc88ProSettingsProbe::read(*live, 0x4b47) == 7)
+            press(*live, uint32_t{1} << unsigned(Sc88ProButton::UserInst));
+        if(Sc88ProSettingsProbe::read(*restored, 0x4b47) == 7)
+            press(*restored, uint32_t{1} << unsigned(Sc88ProButton::UserInst));
+        equal &= compare(dump(*live), dump(*restored), "production-panel-recall");
+    }
+    return equal ? 0 : 1;
+}
+
 static int traceIdleBoundary(Probe& board)
 {
     // Source candidate: dispatcher empty-ready-queue loop00:065B/065F/0662.
@@ -860,6 +921,7 @@ static int runProbe(int argc, char** argv)
         else if(option == "--panel-boundary") panelBoundaryFixture = true;
         else if(option == "--production-adapter") useProductionAdapter = true;
         else if(option == "--panel-clone") panelCloneFixture = true;
+        else if(option == "--panel-recall") panelRecallFixture = true;
         else if(option == "--idle-boundary") idleBoundaryFixture = true;
         else if(option == "--journal-replay") journalFixture = true;
         else if(option == "--journal-ordering") journalOrderingFixture = true;
@@ -890,6 +952,7 @@ static int runProbe(int argc, char** argv)
     if(executionCloneFixture) return testExecutionClone(rom, waves);
     if(journalOrderingFixture) return testJournalReplay(rom, waves, true);
     if(panelCloneFixture) return testPanelClone(rom, waves);
+    if(panelRecallFixture) return testPanelRecall(rom, waves);
     if(panelBoundaryFixture)
     {
         const bool pressed = tracePanelBoundary(source, uint32_t{1} << unsigned(Sc88ProButton::LevelR), "level-down");

@@ -52,6 +52,34 @@ namespace emu88Lib
 		constexpr uint8_t g_sysexEnd = 0xf7;
 		// Firmware00:52AE programs the port-A device ID into sub-MCU register D0.
 		constexpr uint32_t g_deviceIdRegister = 0xe000d0;
+		// ROM 0C:8B25/8BC3 select a zero-based part; 0C:8AAE changes group
+		// with XOR 0010. Manual "Assigning a sound to a Part" specifies ALL +
+		// PART-left for group selection.
+		// These are semantic selection, not descriptor pointers.
+		constexpr size_t g_selectedPart = 0x4d78;
+		constexpr size_t g_partsPerGroup = g_partCount / 2;
+		// ROM dispatch 0C:8748 and table 0D:8912: UserInst toggles normal
+		// page 0 and effect page 7 through 0C:8AFB/8B0D. The firmware rebuilds
+		// its own display and descriptors; no task, timer, or LCD bytes are copied.
+		constexpr size_t g_panelPage = 0x4b47;
+		constexpr uint8_t g_userInstrumentPage = 7;
+		// Same native press/gap timing as Sc88Pro::runFactoryReset, which drives
+		// the actual scanner rather than invoking firmware routines out of context.
+		constexpr unsigned g_panelPressSamples = g_sampleRate / 10;
+		constexpr unsigned g_panelReleaseSamples = g_sampleRate / 4;
+
+		void pressPanel(Sc88Pro& board, const uint32_t buttons)
+		{
+			board.setButtons(buttons);
+			for(unsigned sample{}; sample < g_panelPressSamples; ++sample) board.renderSample();
+			board.setButtons(uint32_t{});
+			for(unsigned sample{}; sample < g_panelReleaseSamples; ++sample) board.renderSample();
+		}
+
+		constexpr uint32_t panelButton(const Sc88ProButton button)
+		{
+			return uint32_t{1} << static_cast<uint8_t>(button);
+		}
 
 		uint16_t readWord(const std::vector<uint8_t>& _bytes, const size_t _offset)
 		{
@@ -104,6 +132,8 @@ namespace emu88Lib
 			return Result::UnsupportedFirmware;
 		if(_image.size() != Sc88Pro::SramSize)
 			return Result::InvalidImage;
+		const auto selectedPart = readWord(_image, g_selectedPart);
+		if(selectedPart >= g_partCount) return Result::InvalidImage;
 		if(_board.m_samplesRendered != unsigned{})
 			return Result::RequiresFreshBoard;
 
@@ -126,6 +156,15 @@ namespace emu88Lib
 
 		_board.m_sram = _image;
 		for(unsigned sample{}; sample < g_bootSamples; ++sample) _board.renderSample();
+		// Reconstruct selection through normal firmware actions. This regenerates
+		// descriptor targets and screen contents on the fresh timeline. Do it before
+		// restoring receive inputs so navigation cannot reset a captured controller.
+		if(selectedPart >= g_partsPerGroup)
+			pressPanel(_board, panelButton(Sc88ProButton::InstAll) | panelButton(Sc88ProButton::PartL));
+		for(size_t part{}; part < selectedPart % g_partsPerGroup; ++part)
+			pressPanel(_board, panelButton(Sc88ProButton::PartR));
+		if(_image[g_panelPage] == g_userInstrumentPage)
+			pressPanel(_board, panelButton(Sc88ProButton::UserInst));
 		auto& memory = _board.m_sram;
 		for(size_t part{}; part < g_partCount; ++part)
 		{

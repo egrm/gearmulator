@@ -45,6 +45,10 @@ int main()
     const auto parameterAddress = (unsigned(rom[0x1aef4]) << 8) | rom[0x1aef5];
     invalidParameter[parameterAddress] = 0xff;
     check(Sc88ProSettings::restore(*fresh, invalidParameter) == Result::InvalidImage, "reject invalid native EFX data");
+    auto invalidSelection = image;
+    invalidSelection[0x4d79] = 32;
+    check(Sc88ProSettings::restore(*fresh, invalidSelection) == Result::InvalidImage,
+          "reject selected part outside both sixteen-part groups");
     check(fresh->cycles() == originalCycles, "invalid image cannot run board");
     check(Sc88ProSettings::restore(*fresh, image) == Result::Success, "restore supported fresh board");
     const auto restoredCycles = fresh->cycles();

@@ -22,7 +22,8 @@ namespace emu88Lib
 		// Firmware-identified completed-input boundary; a held key is never released here.
 		static bool isCaptureBoundary(const Sc88Pro& _board, bool allowHeld);
 		// Only for an unrendered board constructed with factoryReset=false. Boots privately,
-		// restoring settings and receive controls while discarding previous voice history.
+		// restoring settings, receive controls and selected part/UserInst context while
+		// discarding previous voice history. Other front-panel pages need their own map.
 		static Result restore(Sc88Pro& _board, const std::vector<uint8_t>& _image);
 	};
 }
