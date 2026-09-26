@@ -4,6 +4,7 @@
 #include "baseLib/os.h"
 #include "common/test_util.hpp"
 #include <iostream>
+#include <cmath>
 
 namespace
 {
@@ -92,6 +93,44 @@ namespace
 		CHECK(peak > 0.01f);
 		processor.releaseResources();
 	}
+
+	std::vector<float> renderWithBlockSizes(bool variable)
+	{
+		// Host partitioning must not change the sample timeline or lose offset-zero MIDI.
+		juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
+		emu88Player::Processor processor;
+		processor.setRateAndBufferSizeDetails(32000.0, 1024);
+		processor.prepareToPlay(32000.0, 1024);
+		const std::array<int, 8> sizes{0, 1, 7, 63, 257, 511, 1024, 0};
+		std::vector<float> result;
+		unsigned iteration = 0;
+		int position = 0;
+		bool finite = true;
+		while(position < 8192)
+		{
+			const auto requested = variable ? sizes[iteration++ % sizes.size()] : 256;
+			const auto count = std::min(requested, 8192 - position);
+			juce::AudioBuffer<float> audio(2, count);
+			juce::MidiBuffer midi;
+			// Empty blocks carry no MIDI here: they must advance neither audio nor MIDI time.
+			if(count > 0 && position == 0)
+				midi.addEvent(juce::MidiMessage::noteOn(1, 60, juce::uint8(100)), 0);
+			if(position <= 4096 && position + count > 4096)
+				midi.addEvent(juce::MidiMessage::noteOff(1, 60), 4096 - position);
+			processor.processBlock(audio, midi);
+			for(int sample = 0; sample < count; ++sample)
+				for(int channel = 0; channel < audio.getNumChannels(); ++channel)
+				{
+					const auto value = audio.getSample(channel, sample);
+					finite &= std::isfinite(value);
+					result.push_back(value);
+				}
+			position += count;
+		}
+		CHECK(finite);
+		processor.releaseResources();
+		return result;
+	}
 }
 
 int main()
@@ -117,6 +156,10 @@ int main()
 	CHECK(reference == stopped);
 	std::cout << "Compared " << reference.size() << " samples after host Stop against All Sound Off\n";
 	firstNoteAfterConstruction();
+	const auto fixedBlocks = renderWithBlockSizes(false);
+	const auto variableBlocks = renderWithBlockSizes(true);
+	CHECK(fixedBlocks == variableBlocks);
+	std::cout << "Compared " << fixedBlocks.size() << " samples across fixed/variable/empty blocks\n";
 	emu88Player::standaloneLaunch = nullptr;
 	return test::finish("88emuTransport");
 }
