@@ -1,6 +1,7 @@
 // Research fixture: native panel dump and SRAM-reboot diagnostic, not plugin persistence.
 // Manual procedure: Roland SC-88Pro Owner's Manual printed pp.107 and 205.
 #include "88lib/boards/sc88pro.h"
+#include "88lib/boards/sc88proSettings.h"
 #include "baseLib/os.h"
 #include "88lib/rom/rom.h"
 #include <fstream>
@@ -14,6 +15,29 @@
 #include <algorithm>
 
 using namespace emu88Lib;
+
+static bool withoutPortamento = false;
+static bool effectControllerFixture = false;
+static bool activeCaptureFixture = false;
+static bool panelBoundaryFixture = false;
+static bool useProductionAdapter = false;
+static bool panelCloneFixture = false;
+
+// Test stimuli for receive-state fields identified in the installed ROM's MIDI handlers.
+static const std::array<std::array<uint8_t,3>, 16> extraControllerEvents = {{
+    {0xd0, 17, 0}, {0xb0, 5, 63}, {0xb0, 67, 91},
+    {0xb0, 16, 29}, {0xb0, 17, 55}, {0xa0, 60, 77},
+    {0xb0, 65, 127}, {0xb0, 66, 127}, {0xb0, 64, 127},
+    {0xb0, 0, 8}, {0xb0, 32, 3},
+    {0xb0, 99, 1}, {0xb0, 98, 8}, {0xb0, 101, 0}, {0xb0, 100, 0},
+    {0xb0, 84, 48}
+}};
+
+// Per-part byte locations established by the handlers archived in the research report.
+static const std::array<unsigned,13> extraControllerOffsets = {
+    0xc6a0, 0xc6e0, 0xc721, 0xc760, 0xc761, 0xc820, 0xc860,
+    0xc861, 0xc8a0, 0xc8e0, 0xc8e1, 0xc920, 0xc921
+};
 
 struct Probe : Sc88Pro
 {
@@ -155,6 +179,12 @@ static std::vector<Sc88Pro::SampleFrame> renderPhrase(Probe& board)
     std::vector<Sc88Pro::SampleFrame> frames;
     frames.reserve(32000);
     synthLib::SMidiEvent event(synthLib::MidiEventSource::Host);
+    // Exercise pending bank and RPN/NRPN selectors, not just their stored bytes.
+    for(const auto bytes : {std::array<uint8_t,3>{0xc0,0,0}, {0xb0,6,7}, {0xb0,98,9}, {0xb0,6,70}})
+    {
+        event.a = bytes[0]; event.b = bytes[1]; event.c = bytes[2];
+        board.addMidiEvent(event, 0);
+    }
     event.a = 0x90; event.b = 60; event.c = 100;
     board.addMidiEvent(event, 0);
     for(unsigned sample = 0; sample < 32000; ++sample)
@@ -172,15 +202,25 @@ static bool compareAudio(const std::vector<Sc88Pro::SampleFrame>& expected,
                          const std::vector<Sc88Pro::SampleFrame>& actual, const char* label)
 {
     size_t changed = 0;
+    size_t firstChanged = expected.size(), lastChanged = 0;
+    int64_t maximumDifference = 0;
     int64_t referencePeak = 0, actualPeak = 0;
     for(size_t sample = 0; sample < expected.size(); ++sample)
     {
-        if(expected[sample] != actual[sample]) ++changed;
+        if(expected[sample] != actual[sample])
+        {
+            ++changed; firstChanged = std::min(firstChanged, sample); lastChanged = sample;
+            maximumDifference = std::max({maximumDifference,
+                std::abs(int64_t(expected[sample].first)-actual[sample].first),
+                std::abs(int64_t(expected[sample].second)-actual[sample].second)});
+        }
         referencePeak = std::max({referencePeak, std::abs(int64_t(expected[sample].first)), std::abs(int64_t(expected[sample].second))});
         actualPeak = std::max({actualPeak, std::abs(int64_t(actual[sample].first)), std::abs(int64_t(actual[sample].second))});
     }
     std::cout << label << " differing-digital-frames=" << changed << '/' << expected.size()
-              << " source-peak=" << referencePeak << " actual-peak=" << actualPeak << '\n';
+              << " source-peak=" << referencePeak << " actual-peak=" << actualPeak
+              << " first-difference=" << firstChanged << " last-difference=" << lastChanged
+              << " max-difference=" << maximumDifference << '\n';
     const auto firstSound = [](const auto& audio)
     {
         const auto iterator = std::find_if(audio.begin(), audio.end(), [](const auto& frame) { return frame.first || frame.second; });
@@ -212,13 +252,57 @@ static void restoreVerifiedControllers(Probe& board, const std::array<unsigned, 
     }
 }
 
+static std::vector<uint8_t> extraState(Probe& board, const char* label)
+{
+    std::vector<uint8_t> bytes;
+    for(unsigned part = 0; part < 32; ++part)
+    {
+        for(const auto offset : extraControllerOffsets) bytes.push_back(board.extRead8(0xc00000 + offset + part*2));
+        bytes.push_back(board.extRead8(0xc0d5ba + part*2) & 0xe0);
+        for(unsigned key = 0; key < 128; ++key) bytes.push_back(board.extRead8(0xc0b660 + part*128 + key));
+    }
+    std::cout << label << " slot1-extra=";
+    for(const auto offset : extraControllerOffsets) std::cout << ' ' << std::hex << offset << '=' << std::dec << unsigned(board.extRead8(0xc00000 + offset + 2));
+    std::cout << " switch-mask=" << unsigned(board.extRead8(0xc0d5bc) & 0xe0)
+              << " poly60=" << unsigned(board.extRead8(0xc0b660 + 128 + 60)) << '\n' << std::flush;
+    std::cout << label << " global-efx-controls=" << unsigned(board.extRead8(0xc04632)) << ','
+              << unsigned(board.extRead8(0xc04633)) << '\n' << std::flush;
+    return bytes;
+}
+
+static void restoreExtraState(Probe& board, const std::vector<uint8_t>& sram)
+{
+    for(unsigned part = 0; part < 32; ++part)
+    {
+        for(const auto offset : extraControllerOffsets) board.extWrite8(0xc00000 + offset + part*2, sram[offset + part*2]);
+        const unsigned switches = 0xd5ba + part*2;
+        const auto previous = board.extRead8(0xc00000 + switches);
+        board.extWrite8(0xc00000 + switches, uint8_t((previous & ~0xe0) | (sram[switches] & 0xe0)));
+        for(unsigned key = 0; key < 128; ++key)
+        {
+            const unsigned offset = 0xb660 + part*128 + key;
+            board.extWrite8(0xc00000 + offset, sram[offset]);
+        }
+    }
+}
+
+static bool compareExtra(const std::vector<uint8_t>& expected, const std::vector<uint8_t>& actual, const char* label)
+{
+    for(size_t index = 0; index < expected.size(); ++index)
+        if(expected[index] != actual[index])
+            std::cout << label << " extra-mismatch part=" << index / 142 << " field=" << index % 142
+                      << " expected=" << unsigned(expected[index]) << " actual=" << unsigned(actual[index]) << '\n';
+    return expected == actual;
+}
+
 static void restoreVerifiedDirtyFlags(Probe& board)
 {
     // Mirror the bend/modulation/pressure firmware handlers' OR operations exactly.
     // Expression's handler has no such OR; its effect-controller dispatch is a separate question.
     size_t changed = 0;
     for(unsigned part = 0; part < 32; ++part)
-        for(const auto bases : {std::pair<unsigned,unsigned>{0xb3a0,0xb520}, {0xb360,0xb4e0}, {0xb3e0,0xb560}})
+        for(const auto bases : {std::pair<unsigned,unsigned>{0xb3a0,0xb520}, {0xb360,0xb4e0}, {0xb3e0,0xb560},
+                              {0xb420,0xb5a0}, {0xb460,0xb5e0}, {0xb4a0,0xb620}})
         {
             const unsigned source = 0xc00000 + bases.first + part * 2;
             const unsigned target = 0xc00000 + bases.second + part * 2;
@@ -231,9 +315,176 @@ static void restoreVerifiedDirtyFlags(Probe& board)
     std::cout << "dirty-overlay changed-words=" << changed << '\n';
 }
 
-int main(int argc, char** argv)
+static std::vector<uint8_t> captureSram(Probe& board)
 {
-    if(argc != 2) return 2;
+    if(useProductionAdapter)
+    {
+        std::vector<uint8_t> image;
+        if(Sc88ProSettings::capture(board, image) != Sc88ProSettings::Result::Success)
+            throw std::runtime_error("production capture failed");
+        return image;
+    }
+    std::vector<uint8_t> bytes(Sc88Pro::SramSize);
+    for(unsigned index = 0; index < bytes.size(); ++index) bytes[index] = board.extRead8(0xc00000 + index);
+    return bytes;
+}
+
+static std::vector<Sc88Pro::SampleFrame> renderIdle(Probe& board)
+{
+    std::vector<Sc88Pro::SampleFrame> frames;
+    for(unsigned sample = 0; sample < 32000; ++sample) frames.push_back(board.renderSample());
+    return frames;
+}
+
+static bool compareEffectProgram(Probe& expected, Probe& actual)
+{
+    // LSPDispatcher host-read protocol. This diagnostic runs last: no further board execution.
+    const auto read = [](Probe& board, unsigned address)
+    {
+        board.extWrite8(0xf00009, uint8_t(address >> 8));
+        board.extWrite8(0xf00008, uint8_t(address));
+        return unsigned(board.extRead8(0xf00000)) | (unsigned(board.extRead8(0xf00001)) << 8)
+             | (unsigned(board.extRead8(0xf00002)) << 16);
+    };
+    size_t differences = 0;
+    for(unsigned address = lspLib::IramProgramBase; address < lspLib::HostIramSize; ++address)
+    {
+        const auto a = read(expected, address), b = read(actual, address);
+        if(a != b)
+        {
+            ++differences;
+            if(differences <= 12) std::cout << "lsp-program-diff " << std::hex << address << '=' << a << ',' << b << std::dec << '\n';
+        }
+    }
+    std::cout << "lsp-program-differing-words=" << differences << '\n';
+    return differences == 0;
+}
+
+static bool tracePanelBoundary(Probe& board, uint32_t buttons, const char* label)
+{
+    // Firmware: scan0D:8521, processed-matrix0C:5781, UI loop0C:7E9C, ring0C:595A.
+    const auto word = [&](unsigned address) { return (unsigned(board.extRead8(address)) << 8) | board.extRead8(address+1); };
+    const auto descriptor = word(0xc0cf7a);
+    const auto initialLevel = board.extRead8(0xc00000+descriptor+8);
+    std::array<unsigned, 15> previous{};
+    board.setButtons(buttons);
+    for(unsigned sample = 0; sample < 32000; ++sample)
+    {
+        std::array<unsigned,15> current{};
+        bool matricesMatch = true;
+        for(unsigned column = 0; column < 4; ++column)
+        {
+            current[column] = board.extRead8(0xc0466a+column);
+            current[column+4] = board.extRead8(0xc0466e + column);
+            matricesMatch &= current[column] == uint8_t(~(buttons >> (column*8))) && current[column] == current[column+4];
+        }
+        current[8] = word(0xc04666) == word(0xc04668);
+        current[9] = board.extRead8(0xc0f850);
+        current[10] = board.extRead8(0xc0f851);
+        current[11] = board.extRead8(0xc04696+unsigned(Sc88ProButton::LevelR));
+        current[12] = board.extRead8(0xc00000+descriptor+8);
+        current[13] = board.extRead8(0xc0f840);
+        current[14] = board.extRead8(0xc0f841);
+        if(sample == 0 || current != previous)
+        {
+            std::cout << label << " sample=" << sample << " observation=";
+            for(const auto value : current) std::cout << ' ' << std::hex << value;
+            std::cout << std::dec << '\n'; previous = current;
+        }
+        bool deferred = false;
+        for(unsigned key = 0; key < 32; ++key) deferred |= (board.extRead8(0xc04696+key)&1) != 0;
+        if(matricesMatch && !deferred && current[8] && current[9] == 0x89 && !(current[10]&9)
+           && current[13] == 0x81 && !(current[14]&1))
+        {
+            std::cout << label << " candidate-complete=" << sample << " level=" << current[12] << '\n';
+            return buttons == 0 || current[12] == initialLevel+1;
+        }
+        board.renderSample();
+    }
+    return false;
+}
+
+static bool panelBoundary(Probe& board, uint32_t buttons, bool allowDeferred)
+{
+    for(unsigned column = 0; column < 4; ++column)
+        if(board.extRead8(0xc0466a+column) != uint8_t(~(buttons >> (column*8))) ||
+           board.extRead8(0xc0466e + column) != board.extRead8(0xc0466a+column)) return false;
+    if(!allowDeferred)
+        for(unsigned key = 0; key < 32; ++key)
+            if(board.extRead8(0xc04696+key)&1) return false;
+    return board.extRead8(0xc04666) == board.extRead8(0xc04668)
+        && board.extRead8(0xc04667) == board.extRead8(0xc04669)
+        && board.extRead8(0xc0f850) == 0x89 && !(board.extRead8(0xc0f851)&9)
+        && board.extRead8(0xc0f840) == 0x81 && !(board.extRead8(0xc0f841)&1);
+}
+
+static void applyPanelAndWait(Probe& board, uint32_t buttons, bool allowDeferred, const char* label)
+{
+    board.setButtons(buttons);
+    for(unsigned sample = 0; sample < 32000; ++sample)
+    {
+        if(panelBoundary(board, buttons, allowDeferred)) return;
+        board.renderSample();
+    }
+    std::cout << label << " boundary-failed";
+    for(const auto address : {0x4666,0x4667,0x4668,0x4669,0x466a,0x466b,0x466c,0x466d,
+                              0x466e,0x466f,0x4670,0x4671,0xf840,0xf841,0xf850,0xf851})
+        std::cout << ' ' << std::hex << address << '=' << unsigned(board.extRead8(0xc00000+address));
+    std::cout << std::dec << '\n'; screen(board, label);
+    throw std::runtime_error(std::string(label)+": panel boundary did not complete within diagnostic bound");
+}
+
+static int testPanelClone(const std::vector<uint8_t>& rom, const std::vector<uint8_t>& waves)
+{
+    // Hypothesis only: clone native UI context in a private board, excluding the registered
+    // scan timer record46E4. These broad ranges are NOT an approved production layout.
+    bool allEqual = true;
+    for(unsigned scenario = 0; scenario < 3; ++scenario)
+    {
+        auto live = std::make_unique<Probe>(rom, waves);
+        run(*live, 32000*10);
+        if(scenario) press(*live, uint32_t{1} << unsigned(Sc88ProButton::PartR));
+        if(scenario == 2) press(*live, uint32_t{1} << unsigned(Sc88ProButton::UserInst));
+        screen(*live, "clone-context-before-click");
+        applyPanelAndWait(*live, uint32_t{1} << unsigned(Sc88ProButton::LevelR), true, "live-press");
+        std::vector<uint8_t> captured;
+        if(Sc88ProSettings::capture(*live, captured) != Sc88ProSettings::Result::Success)
+            throw std::runtime_error("panel clone capture failed");
+        auto shadow = std::make_unique<Probe>(rom, waves, false);
+        if(Sc88ProSettings::restore(*shadow, captured) != Sc88ProSettings::Result::Success)
+            throw std::runtime_error("panel clone restore failed");
+        for(const auto range : {std::pair<unsigned,unsigned>{0x4666,0x46e4}, {0x4700,0x5000}})
+            for(unsigned address = range.first; address < range.second; ++address)
+                shadow->extWrite8(0xc00000+address, captured[address]);
+        applyPanelAndWait(*shadow, 0, false, "shadow-release");
+        // Only now advance the independent live reference. Private resolution changed none of it.
+        applyPanelAndWait(*live, 0, false, "live-release");
+        if(scenario == 2)
+        {
+            press(*live, uint32_t{1} << unsigned(Sc88ProButton::UserInst));
+            press(*shadow, uint32_t{1} << unsigned(Sc88ProButton::UserInst));
+        }
+        screen(*live, "live-after-click"); screen(*shadow, "shadow-after-click");
+        std::cout << "panel-clone-scenario=" << scenario << '\n' << std::flush;
+        allEqual &= compare(dump(*live), dump(*shadow), "private-panel-resolution");
+    }
+    return allEqual ? 0 : 1;
+}
+
+static int runProbe(int argc, char** argv)
+{
+    if(argc < 2) return 2;
+    for(int index = 2; index < argc; ++index)
+    {
+        const std::string option(argv[index]);
+        if(option == "--without-portamento") withoutPortamento = true;
+        else if(option == "--efx-controller") effectControllerFixture = true;
+        else if(option == "--active-capture") activeCaptureFixture = true;
+        else if(option == "--panel-boundary") panelBoundaryFixture = true;
+        else if(option == "--production-adapter") useProductionAdapter = true;
+        else if(option == "--panel-clone") panelCloneFixture = true;
+        else return 2;
+    }
     baseLib::disableErrorDialogs();
     std::ifstream input(argv[1], std::ios::binary);
     std::vector<uint8_t> rom(std::istreambuf_iterator<char>(input), {});
@@ -249,6 +500,35 @@ int main(int argc, char** argv)
     auto& source = *sourceOwner;
     if(!source.isValid()) return 3;
     run(source, 32000 * 10); screen(source, "booted");
+    if(panelCloneFixture) return testPanelClone(rom, waves);
+    if(panelBoundaryFixture)
+    {
+        const bool pressed = tracePanelBoundary(source, uint32_t{1} << unsigned(Sc88ProButton::LevelR), "level-down");
+        const bool released = tracePanelBoundary(source, 0, "level-up");
+        screen(source, "after-boundary");
+        return pressed && released ? 0 : 1;
+    }
+    if(effectControllerFixture)
+    {
+        // Exact SC-88Pro manual printed p93 example: CC16 controls Distortion Drive.
+        const std::vector<std::vector<uint8_t>> settings = {
+            {0xf0,0x41,0x10,0x42,0x12,0x40,0x41,0x22,1,0x5c,0xf7},
+            {0xf0,0x41,0x10,0x42,0x12,0x40,3,0,1,0x11,0x2b,0xf7},
+            {0xf0,0x41,0x10,0x42,0x12,0x40,3,3,0,0x3a,0xf7},
+            {0xf0,0x41,0x10,0x42,0x12,0x40,3,0x1b,0x10,0x12,0xf7},
+            {0xf0,0x41,0x10,0x42,0x12,0x40,3,0x1c,0x7f,0x22,0xf7}
+        };
+        for(const auto& bytes : settings)
+        {
+            synthLib::SMidiEvent setting(synthLib::MidiEventSource::Host);
+            setting.sysex.assign(bytes.begin(), bytes.end()); source.addMidiEvent(setting, 0); run(source, 32000);
+        }
+    }
+    // SC-88Pro manual p.196: Rx.NRPN defaults OFF; address40 11 0A enables it for A1.
+    synthLib::SMidiEvent enableNrpn(synthLib::MidiEventSource::Host);
+    enableNrpn.sysex = {0xf0,0x41,0x10,0x42,0x12,0x40,0x11,0x0a,1,0x24,0xf7};
+    source.addMidiEvent(enableNrpn, 0);
+    run(source, 32000);
     writeMasterVolume(source, 73);
     midi(source, 0xc0, 40); // Distinct part-A program, controller values and bend for the recall fixture.
     midi(source, 0xb0, 7, 81);
@@ -264,18 +544,58 @@ int main(int argc, char** argv)
     midi(source, 0xcf, 56, 0, 1); // Last channel on B must not alias A's state.
     midi(source, 0xbf, 7, 61, 1);
     press(source, uint32_t{1} << unsigned(Sc88ProButton::LevelR));
+    for(const auto bytes : extraControllerEvents)
+        if(!withoutPortamento || (bytes[1] != 65 && bytes[1] != 84)) midi(source, bytes[0], bytes[1], bytes[2]);
     screen(source, "edited");
     std::cout << "edited-master=" << unsigned(source.extRead8(0xc05042)) << '\n';
     const auto expectedControllers = controllers(source, "edited-source");
+    const auto expectedExtra = extraState(source, "edited-source");
+    if(activeCaptureFixture)
+    {
+        const auto beforeNotes = captureSram(source);
+        midi(source, 0x90, 60, 100);
+        midi(source, 0x9f, 67, 100, 1);
+        const auto whileSounding = captureSram(source);
+        const auto soundingAudio = renderIdle(source);
+        const auto restore = [&](const auto& bytes)
+        {
+            auto board = std::make_unique<Probe>(rom, waves, false);
+            if(useProductionAdapter)
+            {
+                if(Sc88ProSettings::restore(*board, bytes) != Sc88ProSettings::Result::Success)
+                    throw std::runtime_error("production active-image restore failed");
+                return board;
+            }
+            for(unsigned index = 0; index < bytes.size(); ++index) board->extWrite8(0xc00000+index, bytes[index]);
+            run(*board, 32000*10);
+            restoreVerifiedControllers(*board, expectedControllers);
+            restoreExtraState(*board, bytes);
+            restoreVerifiedDirtyFlags(*board);
+            run(*board, 32000);
+            return board;
+        };
+        auto silent = restore(beforeNotes), restoredActive = restore(whileSounding);
+        const auto silentAudio = renderIdle(*silent), restoredAudio = renderIdle(*restoredActive);
+        compareAudio(soundingAudio, silentAudio, "sounding-source-vs-silent-reference");
+        const bool silentEqual = compareAudio(silentAudio, restoredAudio, "active-capture-restores-silent");
+        return soundingAudio != silentAudio && silentEqual ? 0 : 1;
+    }
+    if(source.extRead8(0xc0c6a2) != 17 || source.extRead8(0xc0c6e2) != 63 ||
+       source.extRead8(0xc0c723) != 91 || (source.extRead8(0xc0d5bc) & 0xe0) != (withoutPortamento ? 0xc0 : 0xe0) ||
+       source.extRead8(0xc0b660 + 128 + 60) != 77 || source.extRead8(0xc0c762) != 29 ||
+       source.extRead8(0xc0c763) != 55 || source.extRead8(0xc0c862) != 8 || source.extRead8(0xc0c822) != 3 ||
+       source.extRead8(0xc0c863) != 0xff || source.extRead8(0xc0c8e2) || source.extRead8(0xc0c8e3) ||
+       source.extRead8(0xc0c922) != 1 || source.extRead8(0xc0c923) != 8)
+        throw std::runtime_error("extended controller edits were not observed in firmware state");
     bool observedControllerEdits = false;
     for(size_t index = 0; index < expectedControllers.size(); index += 4)
         observedControllerEdits |= expectedControllers[index] == (71 * 128 + 23) &&
                                    expectedControllers[index+1] == 43 && expectedControllers[index+2] == 99;
     if(!observedControllerEdits) throw std::runtime_error("probe did not observe the source controller edits; cannot test controller recall");
     const auto expected = dump(source);
+    compareExtra(expectedExtra, extraState(source, "source-after-dump"), "dump-side-effect");
     controllers(source, "source-after-dump");
-    std::vector<uint8_t> sram(Sc88Pro::SramSize);
-    for(unsigned index = 0; index < sram.size(); ++index) sram[index] = source.extRead8(0xc00000 + index);
+    const auto sram = captureSram(source);
     auto restoredOwner = std::make_unique<Probe>(rom, waves, false);
     auto& restored = *restoredOwner;
     for(unsigned index = 0; index < sram.size(); ++index) restored.extWrite8(0xc00000 + index, sram[index]);
@@ -306,20 +626,52 @@ int main(int argc, char** argv)
     const auto corrected = [&](bool dirty = false)
     {
         auto board = std::make_unique<Probe>(rom, waves, false);
+        if(useProductionAdapter && dirty)
+        {
+            if(Sc88ProSettings::restore(*board, sram) != Sc88ProSettings::Result::Success)
+                throw std::runtime_error("production restore failed");
+            return board;
+        }
         for(unsigned index = 0; index < sram.size(); ++index) board->extWrite8(0xc00000 + index, sram[index]);
         run(*board, 32000 * 10);
         restoreVerifiedControllers(*board, expectedControllers);
+        restoreExtraState(*board, sram);
         if(dirty) restoreVerifiedDirtyFlags(*board);
+        if(dirty && effectControllerFixture)
+        {
+            // 01:AE74/01:AEB4 record latest effect-controller inputs independently of parts.
+            board->extWrite8(0xc04632, sram[0x4632]);
+            board->extWrite8(0xc04633, sram[0x4633]);
+            // Manual pp196-197:20 base EFX parameters at40 03 03..16. The firmware's
+            // parameter-pointer table01:AEF4 supplies their authoritative SRAM locations.
+            // Resend unchanged values to request native coefficient recomputation.
+            synthLib::SMidiEvent refresh(synthLib::MidiEventSource::Host);
+            refresh.sysex = {0xf0,0x41,0x10,0x42,0x12,0x40,3,3};
+            unsigned checksum = 0x40 + 3 + 3;
+            for(unsigned parameter = 0; parameter < 20; ++parameter)
+            {
+                const unsigned pointer = 0x1aef4 + parameter*2;
+                const unsigned address = (unsigned(board->extRead8(pointer)) << 8) | board->extRead8(pointer+1);
+                const auto value = sram[address];
+                refresh.sysex.push_back(value); checksum += value;
+            }
+            refresh.sysex.push_back(uint8_t(-checksum & 0x7f));
+            refresh.sysex.push_back(0xf7);
+            board->addMidiEvent(refresh, 0);
+        }
         run(*board, 32000);
         return board;
     };
-    auto correctedA = corrected();
-    auto correctedB = corrected();
+    auto correctedA = corrected(useProductionAdapter);
+    auto correctedB = corrected(useProductionAdapter);
     const auto correctedControllersEqual = expectedControllers == controllers(*correctedA, "corrected-sram");
+    const auto correctedExtraEqual = compareExtra(expectedExtra, extraState(*correctedA, "corrected-sram"), "corrected-sram");
     const auto correctedAudioA = renderPhrase(*correctedA);
     const auto correctedAudioB = renderPhrase(*correctedB);
     const auto deterministic = compareAudio(correctedAudioA, correctedAudioB, "fresh-corrected-pair");
     compareAudio(referenceAudio, correctedAudioA, "source-vs-corrected");
+    const auto makeFirmwareReference = [&](bool redundant)
+    {
     auto firmwareReference = std::make_unique<Probe>(rom, waves, false);
     for(unsigned index = 0; index < sram.size(); ++index) firmwareReference->extWrite8(0xc00000 + index, sram[index]);
     run(*firmwareReference, 32000 * 10);
@@ -331,15 +683,66 @@ int main(int argc, char** argv)
         event.a = bytes[0]; event.b = bytes[1]; event.c = bytes[2];
         firmwareReference->addMidiEvent(event, 0);
     }
+    // B16's Rx.NRPN is OFF: the handler clears only its selector, retaining FF parameters.
+    // This reestablishes the captured inactive selector without injecting Data Entry/settings.
+    synthLib::SMidiEvent inactiveSelector(synthLib::MidiEventSource::Host);
+    inactiveSelector.a = 0xbf; inactiveSelector.b = 99; inactiveSelector.c = 0;
+    firmwareReference->addMidiEvent(inactiveSelector, 1);
+    for(const auto bytes : extraControllerEvents)
+    {
+        if(withoutPortamento && (bytes[1] == 65 || bytes[1] == 84)) continue;
+        synthLib::SMidiEvent event(synthLib::MidiEventSource::Host);
+        event.a = bytes[0]; event.b = bytes[1]; event.c = bytes[2];
+        firmwareReference->addMidiEvent(event, 0);
+    }
+    if(redundant)
+    {
+        synthLib::SMidiEvent duplicate(synthLib::MidiEventSource::Host);
+        duplicate.a = 0xb0; duplicate.b = 5; duplicate.c = 63;
+        firmwareReference->addMidiEvent(duplicate, 0);
+    }
     run(*firmwareReference, 32000);
+    return firmwareReference;
+    };
+    auto firmwareReference = makeFirmwareReference(false);
+    auto coefficientReference = makeFirmwareReference(false);
+    auto coefficientCandidate = corrected(true);
+    const bool effectGlobalsEqual = coefficientReference->extRead8(0xc04632) == coefficientCandidate->extRead8(0xc04632)
+                                 && coefficientReference->extRead8(0xc04633) == coefficientCandidate->extRead8(0xc04633);
+    const bool effectProgramEqual = compareEffectProgram(*coefficientReference, *coefficientCandidate);
+    coefficientReference.reset(); coefficientCandidate.reset();
     const bool firmwareControllersEqual = expectedControllers == controllers(*firmwareReference, "firmware-reference");
-    const auto firmwareAudio = renderPhrase(*firmwareReference);
-    const auto firmwareExact = compareAudio(firmwareAudio, correctedAudioA, "firmware-vs-overlay");
+    const bool firmwareExtraEqual = compareExtra(expectedExtra, extraState(*firmwareReference, "firmware-reference"), "firmware-reference");
     auto correctedDirty = corrected(true);
+    for(unsigned offset = 0xb360; offset < 0xca40; ++offset)
+        if(firmwareReference->extRead8(0xc00000 + offset) != correctedDirty->extRead8(0xc00000 + offset))
+            std::cout << "pre-note-controller-diff " << std::hex << offset << std::dec << '='
+                      << unsigned(firmwareReference->extRead8(0xc00000 + offset)) << ','
+                      << unsigned(correctedDirty->extRead8(0xc00000 + offset)) << '\n';
+    const auto firmwareAudio = renderPhrase(*firmwareReference);
+    auto duplicateReference = makeFirmwareReference(true);
+    const auto duplicateAudio = renderPhrase(*duplicateReference);
+    compareAudio(firmwareAudio, duplicateAudio, "firmware-vs-redundant-midi");
+    const auto firmwareExact = compareAudio(firmwareAudio, correctedAudioA, "firmware-vs-overlay");
     const auto dirtyAudio = renderPhrase(*correctedDirty);
+    compareAudio(duplicateAudio, dirtyAudio, "redundant-midi-vs-dirty-overlay");
     const auto dirtyExact = compareAudio(firmwareAudio, dirtyAudio, "firmware-vs-dirty-overlay");
     compareAudio(correctedAudioA, dirtyAudio, "plain-vs-dirty-overlay");
+    const auto futureSettingsEqual = compare(dump(*firmwareReference), dump(*correctedDirty), "future-bank-rpn-nrpn");
     std::cout << "corrected-controllers-equal=" << correctedControllersEqual << " fresh-pair-exact=" << deterministic << '\n';
     // Negative controls must expose controller loss; the narrow overlay must restore measured fields.
-    return sramEqual && nativeEqual && !sramControllersEqual && !nativeControllersEqual && correctedControllersEqual && deterministic && firmwareControllersEqual && (firmwareExact || dirtyExact) ? 0 : 1;
+    // With routed recursive EFX, restored tail history intentionally differs; compare its exact
+    // programmed coefficients before any note instead of inventing a PCM tolerance.
+    const bool soundSettingsEqual = effectControllerFixture ? effectGlobalsEqual && effectProgramEqual : firmwareExact || dirtyExact;
+    return sramEqual && nativeEqual && !sramControllersEqual && !nativeControllersEqual && correctedControllersEqual && correctedExtraEqual && deterministic && firmwareControllersEqual && firmwareExtraEqual && futureSettingsEqual && soundSettingsEqual ? 0 : 1;
+}
+
+int main(int argc, char** argv)
+{
+    try { return runProbe(argc, argv); }
+    catch(const std::exception& error)
+    {
+        std::cerr << "probe failed: " << error.what() << std::endl;
+        return 1;
+    }
 }
