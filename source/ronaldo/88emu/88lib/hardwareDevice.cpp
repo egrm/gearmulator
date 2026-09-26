@@ -12,6 +12,8 @@
 #include "hardwareLib/lcdfonts.h"
 #include "88lib/boards/sc55Board.h"
 #include "88lib/boards/sc88pro.h"
+#include "88lib/boards/sc88proSettings.h"
+#include "88lib/settingsChunk.h"
 #include "88lib/boards/sc88types.h"
 
 #include <algorithm>
@@ -90,15 +92,18 @@ namespace emu88Lib
 	}
 
 	HardwareDevice::HardwareDevice(const synthLib::DeviceCreateParams& _params, const BootOptions& _boot,
-	                               const std::vector<uint8_t>& _pcmCard)
+	                               const std::vector<uint8_t>& _pcmCard, const SettingsChunk* _settings)
 		: synthLib::Device(_params)
 	{
 		if(!isDeviceModelValue(_params.customData))
 			return;
 		m_model = static_cast<DeviceModel>(_params.customData);
+		if(_settings && (_settings->model != m_model || m_model != DeviceModel::Sc88Pro ||
+		                 _settings->layout != Sc88ProSettings::LayoutVersion || _boot.initialPanelButtons))
+			return;
 		m_dacBits = getDacBits(m_model);
 		m_boardGain = getBoardOutputGain(m_model);
-		const bool factoryReset = _boot.factoryReset && !_boot.initialPanelButtons;
+		const bool factoryReset = !_settings && _boot.factoryReset && !_boot.initialPanelButtons;
 
 		switch(m_model)
 		{
@@ -109,11 +114,14 @@ namespace emu88Lib
 			// board finds that out from the control ROM's vector table.
 			auto roms = RomLoader::findSc88ProRomSet(RomLoader::toRomDevice(m_model));
 			if(!roms.isValid()) break;
+			if(_settings && _settings->firmware != baseLib::MD5(roms.firmware).getWords()) break;
 			std::vector<uint8_t> waves;
 			waves.reserve(Sc88ProRomSet::WaveSize);
 			for(const auto* chip : {&roms.waveA, &roms.waveB, &roms.waveC})
 				waves.insert(waves.end(), chip->begin(), chip->end());
 			m_sc88Pro = std::make_unique<Sc88Pro>(std::move(roms.firmware), waves, factoryReset);
+			if(_settings && Sc88ProSettings::restore(*m_sc88Pro, _settings->memory) != Sc88ProSettings::Result::Success)
+				m_sc88Pro.reset();
 			break;
 		}
 		case DeviceModel::Cm32p:
@@ -230,12 +238,14 @@ namespace emu88Lib
 			else if(m_cm64) m_cm64->setButtons(_boot.initialPanelButtons);
 		}
 
-		if(_boot.fastBoot && !_boot.initialPanelButtons)
+		if(_settings || (_boot.fastBoot && !_boot.initialPanelButtons))
 		{
 			// What the board sends out meanwhile is dropped; its display is published so the panel
 			// starts on the screen the board is now showing.
-			for(auto samples = static_cast<uint64_t>(g_fastBootSeconds * dacSamplerate()); samples > 0; --samples)
-				renderBoardFrame();
+			// The settings adapter already completed its private boot and receive-state settle.
+			if(!_settings)
+				for(auto samples = static_cast<uint64_t>(g_fastBootSeconds * dacSamplerate()); samples > 0; --samples)
+					renderBoardFrame();
 			std::vector<synthLib::SMidiEvent> discarded;
 			readMidiOutFromBoard(discarded);
 			publishDisplaySnapshot();

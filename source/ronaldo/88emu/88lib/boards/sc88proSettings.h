@@ -13,6 +13,8 @@ namespace emu88Lib
 	class Sc88ProSettings final
 	{
 	public:
+		// First verified SRAM/receive-field map for SC-88Pro firmware1.02.
+		static constexpr uint32_t LayoutVersion = 1;
 		enum class Result { Success, UnsupportedFirmware, InvalidImage, RequiresFreshBoard };
 
 		// Copies authoritative firmware memory without rendering or changing the live board.

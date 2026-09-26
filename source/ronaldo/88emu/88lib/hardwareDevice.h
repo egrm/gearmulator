@@ -28,6 +28,7 @@ namespace emu88Lib
 	class Sc55Board;
 	class Nu10b;
 	class Miig5;
+	struct SettingsChunk;
 
 	// Offline work the device does at construction, before anyone can hear or see it.
 	struct BootOptions
@@ -79,8 +80,10 @@ namespace emu88Lib
 
 		// _pcmCard is a raw card image for a board with a PCM card slot (the CM-32P, and the
 		// CM-64's PCM half); empty leaves the slot empty.
+		// A supplied settings image is restored into this fresh instance before processing.
+		// Missing assets or unsupported identity/layout leave it invalid; no model fallback.
 		explicit HardwareDevice(const synthLib::DeviceCreateParams& _params, const BootOptions& _boot = {},
-		                        const std::vector<uint8_t>& _pcmCard = {});
+		                        const std::vector<uint8_t>& _pcmCard = {}, const SettingsChunk* _settings = nullptr);
 		// Whether the CM-32P can read _image as a PCM card.
 		static bool isPcmCardImage(const std::vector<uint8_t>& _image);
 		~HardwareDevice() override;
