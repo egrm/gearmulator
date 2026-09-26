@@ -21,6 +21,9 @@ namespace emu88Player
 		constexpr auto g_pcmCardPathKey = "pcmCardPath";
 		// JUCE 7 PropertiesFile::Options: a negative delay disables automatic saving.
 		constexpr int g_noConfigAutoSaveMs = -1;
+		// Match jucePluginLib/processor.cpp: zero represents unavailable host timing;
+		// hasPpqPosition separately distinguishes a real PPQ zero from missing data.
+		constexpr float g_unknownHostTiming = 0.0f;
 
 	}
 
@@ -564,8 +567,25 @@ namespace emu88Player
 		// This standalone has no audio inputs.
 		synthLib::TAudioInputs inputs{};
 		synthLib::TAudioOutputs outputs{_buffer.getWritePointer(0), _buffer.getWritePointer(1)};
+		// Use the shared instrument processor's playhead contract so the engine can
+		// cancel stale MIDI and silence active channels on host Stop and seeks.
+		bool playing = false;
+		bool hasPpqPosition = false;
+		float bpm = g_unknownHostTiming;
+		float ppq = g_unknownHostTiming;
+		if(const auto* playHead = getPlayHead())
+			if(const auto position = playHead->getPosition())
+			{
+				playing = position->getIsPlaying();
+				if(const auto tempo = position->getBpm()) bpm = static_cast<float>(*tempo);
+				if(const auto beats = position->getPpqPosition())
+				{
+					ppq = static_cast<float>(*beats);
+					hasPpqPosition = true;
+				}
+			}
 		m_engine->process(inputs, outputs, static_cast<size_t>(_buffer.getNumSamples()),
-		                  120.0f, 0.0f, false, false);
+		                  bpm, ppq, playing, hasPpqPosition);
 
 		// The device can change its clock while playing. Switching the resampler over builds and
 		// prewarms new filters, so Plugin only records the new rate here - apply it off this thread.
