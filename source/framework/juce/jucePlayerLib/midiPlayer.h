@@ -18,6 +18,8 @@ namespace jucePlayer
 {
     class MidiPlayer final
     {
+        struct Song;
+        struct Playlist;
     public:
         static constexpr double kEndTailSeconds = 4.0;
 
@@ -117,6 +119,21 @@ namespace jucePlayer
         uint64_t commandRevision() const { return m_command.load(std::memory_order_acquire); }
         Status status() const;
 
+        // Retain immutable songs while under the audio owner's lock; encoding their
+        // events can then run after releasing that lock, even if the player is gone.
+        class PersistentSnapshot
+        {
+        public:
+            std::unique_ptr<juce::XmlElement> toXml() const;
+        private:
+            friend class MidiPlayer;
+            std::shared_ptr<const Playlist> playlist;
+            ResetMode reset = ResetMode::Off;
+            uint32_t gap{};
+            uint32_t tail{};
+            int selected = -1;
+        };
+        PersistentSnapshot capturePersistentState() const;
         // Immutable song data, not filesystem references or playback/voice history.
         std::unique_ptr<juce::XmlElement> persistentState() const;
         bool loadPersistentState(const juce::XmlElement& state);
@@ -132,8 +149,6 @@ namespace jucePlayer
                           bool _playbackEnabled = true);
 
     private:
-        struct Song;
-        struct Playlist;
         enum class Command : uint8_t
         {
             None,

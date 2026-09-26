@@ -130,12 +130,18 @@ namespace jucePlayer
 
     std::unique_ptr<juce::XmlElement> MidiPlayer::persistentState() const
     {
-        auto state = std::make_unique<juce::XmlElement>("Player");
-        state->setAttribute("reset", static_cast<int>(resetMode()));
-        state->setAttribute("gap", static_cast<int>(songGapMs()));
-        state->setAttribute("tail", static_cast<int>(m_endTailMs.load()));
-        const auto playlist = std::atomic_load_explicit(&m_playlist, std::memory_order_acquire);
-        if(!playlist) return state;
+        return capturePersistentState().toXml();
+    }
+
+    MidiPlayer::PersistentSnapshot MidiPlayer::capturePersistentState() const
+    {
+        PersistentSnapshot snapshot;
+        snapshot.reset = resetMode();
+        snapshot.gap = songGapMs();
+        snapshot.tail = m_endTailMs.load();
+        snapshot.playlist = std::atomic_load_explicit(&m_playlist, std::memory_order_acquire);
+        const auto& playlist = snapshot.playlist;
+        if(!playlist) return snapshot;
         // A playlist publication can precede the next audio callback's index remap.
         // Resolve the immutable selected song against this exact published playlist.
         auto selected = -1;
@@ -152,6 +158,17 @@ namespace jucePlayer
         if(pending != m_lastCommand && static_cast<Command>(pending & commandMask) == Command::Play)
             selected = static_cast<int>((pending >> commandBits) & commandIndexMask);
         if(selected < 0 || static_cast<size_t>(selected) >= playlist->songs.size()) selected = -1;
+        snapshot.selected = selected;
+        return snapshot;
+    }
+
+    std::unique_ptr<juce::XmlElement> MidiPlayer::PersistentSnapshot::toXml() const
+    {
+        auto state = std::make_unique<juce::XmlElement>("Player");
+        state->setAttribute("reset", static_cast<int>(reset));
+        state->setAttribute("gap", static_cast<int>(gap));
+        state->setAttribute("tail", static_cast<int>(tail));
+        if(!playlist) return state;
         state->setAttribute("selected", selected);
         for(const auto& song : playlist->songs)
         {

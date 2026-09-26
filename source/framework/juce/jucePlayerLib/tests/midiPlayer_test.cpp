@@ -56,6 +56,31 @@ namespace
             std::count_if(events.begin(), events.end(), [](const auto& e) { return (e.a & 0xf0) == 0x90 && e.c; }));
     }
 
+    void deferredStateSerialization(const Fixtures& files)
+    {
+        MidiPlayer::PersistentSnapshot snapshot;
+        juce::String expected;
+        {
+            MidiPlayer player;
+            player.addFiles(files.paths);
+            player.setSongGapMs(321);
+            player.play(1);
+            expected = player.persistentState()->toString();
+            snapshot = player.capturePersistentState();
+            player.clear();
+            player.setSongGapMs(654);
+            player.stop();
+        }
+        const auto serialized = snapshot.toXml();
+        CHECK(serialized->toString() == expected);
+        MidiPlayer restored;
+        CHECK(restored.loadPersistentState(*serialized));
+        CHECK_EQ(restored.entries().size(), 3u);
+        CHECK_EQ(restored.status().currentIndex, 1);
+        CHECK_EQ(restored.songGapMs(), 321u);
+        CHECK(restored.status().state == MidiPlayer::State::Stopped);
+    }
+
     void poweredOff(const Fixtures& files)
     {
         MidiPlayer player(4, MidiPlayer::ResetMode::Gs);
@@ -527,6 +552,7 @@ int main()
 
     Fixtures files;
     checkMidiFiles();
+    deferredStateSerialization(files);
     poweredOff(files);
     resetTiming(files);
     gapsAndCancellation(files);

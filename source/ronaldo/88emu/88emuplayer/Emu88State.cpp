@@ -120,7 +120,13 @@ namespace emu88Player
         {
             std::unique_ptr<emu88Lib::HardwareDevice> board;
             std::unique_ptr<synthLib::Plugin> engine;
-            std::unique_ptr<juce::XmlElement> payload;
+            // Only setStateInformation replaces this envelope, under the same state
+            // transaction. Its potentially large loaded playlist can be copied without
+            // blocking audio; live mutable controls are captured below.
+            auto payload = m_stateEnvelope ? std::make_unique<juce::XmlElement>(*m_stateEnvelope)
+                                           : std::make_unique<juce::XmlElement>("Payload");
+            jucePlayer::MidiPlayer::PersistentSnapshot playerSnapshot;
+            std::vector<uint8_t> cardBytes;
             {
                 const juce::ScopedLock lock(getCallbackLock());
                 if(m_loadedStateUnchanged && m_loadedState.getSize() &&
@@ -128,12 +134,13 @@ namespace emu88Player
                    m_loadedPlayerStatusRevision == m_midiPlayer.status().revision &&
                    m_loadedPlayerCommandRevision == m_midiPlayer.commandRevision())
                 {
-                    destination = m_loadedState;
                     m_lastStateSucceeded.store(true);
+                    // The state transaction keeps these bytes alive. The cache
+                    // decision belongs to this instant, before later audio edits.
+                    const juce::ScopedUnlock unlocked(getCallbackLock());
+                    destination = m_loadedState;
                     return;
                 }
-                payload = m_stateEnvelope ? std::make_unique<juce::XmlElement>(*m_stateEnvelope)
-                                          : std::make_unique<juce::XmlElement>("Payload");
                 payload->setAttribute("model", static_cast<int>(m_deviceModel));
                 if(!m_unavailableState) payload->setAttribute("power", m_device != nullptr);
                 payload->setAttribute("gain", outputGain());
@@ -143,10 +150,8 @@ namespace emu88Player
                 payload->setAttribute("resampler", static_cast<int>(resamplerMode()));
                 auto preferences = instancePreferences(*m_config);
                 replaceChild(*payload, "Preferences", std::move(preferences));
-                replaceChild(*payload, "Player", m_midiPlayer.persistentState());
-                auto card = std::make_unique<juce::XmlElement>("Card");
-                card->addTextElement(juce::MemoryBlock(m_pcmCard.data(), m_pcmCard.size()).toBase64Encoding());
-                replaceChild(*payload, "Card", std::move(card));
+                playerSnapshot = m_midiPlayer.capturePersistentState();
+                cardBytes = m_pcmCard;
                 if(m_device)
                 {
                     if(!m_device->isValid()) throw std::runtime_error("Cannot capture unavailable hardware without a loaded recovery state");
@@ -159,6 +164,10 @@ namespace emu88Player
                 }
                 else if(!m_unavailableState) payload->deleteAllChildElementsWithTagName("Hardware");
             }
+            replaceChild(*payload, "Player", playerSnapshot.toXml());
+            auto card = std::make_unique<juce::XmlElement>("Card");
+            card->addTextElement(juce::MemoryBlock(cardBytes.data(), cardBytes.size()).toBase64Encoding());
+            replaceChild(*payload, "Card", std::move(card));
             if(board)
             {
                 // Accepted upstream input runs through the copied converter, preserving
