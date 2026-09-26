@@ -10,6 +10,8 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <map>
+#include <string_view>
 #include <stdexcept>
 #include <vector>
 
@@ -20,6 +22,10 @@ namespace emu88Lib
 struct Sc88ExecutionProbe
 {
     static const std::vector<uint8_t>& ram(const Sc88& board) { return board.m_sram; }
+    static uint32_t pc(const Sc88& board)
+    {
+        return board.m_machine.cpu().code_addr(board.m_machine.cpu().regs().pc);
+    }
     static void seed(Sc88& board, const std::vector<uint8_t>& image)
     {
         if(board.m_samplesRendered != 0 || image.size() != Sc88::SramSize)
@@ -260,7 +266,7 @@ bool inspectVariant(const std::vector<uint8_t>& rom, const std::vector<uint8_t>&
            stableRam[g_batteryPreference] == source[g_batteryPreference];
 }
 
-bool exercise(Model model)
+bool exercise(Model model, bool idleTrace)
 {
     auto romAsset = RomLoader::findROM(model);
     auto wavesAsset = RomLoader::findWaveRom();
@@ -276,6 +282,23 @@ bool exercise(Model model)
     auto rom = romAsset.takeData();
     auto live = std::make_unique<Sc88>(rom, waves, model);
     run(*live, g_bootSamples);
+    if(idleTrace)
+    {
+        std::map<uint32_t,size_t> frequency;
+        for(unsigned sample{};sample<g_sampleRate;++sample)
+        {
+            live->renderSample();
+            ++frequency[Sc88ExecutionProbe::pc(*live)];
+        }
+        std::vector<std::pair<size_t,uint32_t>> ranked;
+        for(const auto& [pc,count]:frequency) ranked.emplace_back(count,pc);
+        std::sort(ranked.rbegin(),ranked.rend());
+        std::cout << "idle-pc-frequency model=" << static_cast<int>(model) << '\n';
+        for(size_t index{};index<std::min<size_t>(20,ranked.size());++index)
+            std::cout << "pc=0x" << std::hex << ranked[index].second << std::dec
+                      << " samples=" << ranked[index].first << '\n';
+        return true; // Candidate PCs require disassembly, never a readiness claim.
+    }
     const auto before = Sc88ExecutionProbe::ram(*live);
     editAllParts(*live);
     const auto captured = Sc88ExecutionProbe::ram(*live);
@@ -304,13 +327,14 @@ bool exercise(Model model)
 int main(int argc, char** argv)
 {
     baseLib::disableErrorDialogs();
-    if(argc != 2) return 77;
+    if(argc != 2 && (argc != 3 || std::string_view(argv[2]) != "--idle-pc")) return 77;
+    const bool idleTrace = argc == 3;
     synthLib::RomLoader::setSearchPath(argv[1]);
     try
     {
         bool passed = true;
-        for(const auto model : {Model::Sc88, Model::Sc88VL}) passed &= exercise(model);
-        std::cout << "SC-88/VL boot-preservation diagnostic "
+        for(const auto model : {Model::Sc88, Model::Sc88VL}) passed &= exercise(model,idleTrace);
+        std::cout << (idleTrace ? "SC-88/VL idle-PC diagnostic " : "SC-88/VL boot-preservation diagnostic ")
                   << (passed ? "completed; inspect differences" : "gate/preference check failed") << '\n';
         return passed ? 0 : 1;
     }
