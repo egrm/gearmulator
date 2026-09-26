@@ -211,6 +211,17 @@ namespace emu88Player
             m_settingsWindow.reset();
             return;
         }
+
+        if (m_processor.isHosted())
+        {
+            // Keep sound controls available; device ownership belongs to the host.
+            for (const auto* id : {"audioHardwareSettings", "midiHardwareSettings", "btFastBoot"})
+                if (auto* element = m_settingsRoot->GetElementById(id))
+                    element->SetProperty(Rml::PropertyId::Display, Rml::Style::Display::None);
+            for (const auto* id : {"hostAudioNote", "hostMidiNote"})
+                if (auto* element = m_settingsRoot->GetElementById(id))
+                    element->SetProperty(Rml::PropertyId::Display, Rml::Style::Display::Block);
+        }
         juceRmlUi::EventListener::Add(m_settingsRoot, Rml::EventId::Keydown,
                                       [this](Rml::Event& _event)
                                       {

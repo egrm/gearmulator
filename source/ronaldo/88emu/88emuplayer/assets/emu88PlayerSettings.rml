@@ -89,6 +89,8 @@
 				<div class="hardwareSettingsPageHeader">
 					<h1>Audio</h1>
 				</div>
+				<div id="hostAudioNote" class="hardwareMidiNote" style="display: none;">Audio device and routing are controlled by your DAW.</div>
+				<div id="audioHardwareSettings">
 				<div class="hardwareSettingsSectionLabel">Audio device</div>
 				<div class="hardwareFormGrid">
 					<div class="hardwareField"><label>Driver</label><combo id="audioDeviceType" popup="window"/></div>
@@ -101,6 +103,7 @@
 				<div id="audioChannelWarning" style="display: none; margin: 8px 0; color: #e5b86d;"/>
 				<div id="audioControlPanelRow" class="hardwareInlineChoices" style="display: none;">
 					<button id="btAudioControlPanel" class="button">Driver Control Panel...</button>
+				</div>
 				</div>
 				<div id="btOutputLimiter" class="hardwareChoice hardwareWideChoice"><button id="button" class="settings-checkbox"/><label>Apply limiter to output</label></div>
 				<div class="hardwareSettingsSectionLabel">Resampler</div>
@@ -119,6 +122,8 @@
 				<div class="hardwareSettingsPageHeader">
 					<h1>MIDI</h1>
 				</div>
+				<div id="hostMidiNote" class="hardwareMidiNote" style="display: none;">MIDI comes from your DAW.</div>
+				<div id="midiHardwareSettings">
 				<div class="hardwareMidiRow">
 					<div class="hardwareField hardwareMidiOutput"><label>Output</label><combo id="midiOutputDevice" popup="window"/></div>
 					<div id="btPortMidi" class="hardwareChoice hardwarePortMidi"><button id="button" class="settings-checkbox"/><label>Enable Virtual Port</label></div>
@@ -137,6 +142,7 @@
 					</div>
 				</div>
 				<div id="portMidiUnsupported" class="hardwareMidiNote" style="display: none;">Virtual MIDI ports are not supported on Windows. To connect other applications, install a loopback driver such as loopMIDI and enable its port above.</div>
+				</div>
 			</div>
 
 			<div id="pageSettingsDeveloper" class="hardwareSettingsPage" style="display: none;">
