@@ -24,6 +24,7 @@ set(SOURCES
 	boards/sc55Board.cpp boards/sc55Board.h
 	mcu/sc55_submcu.cpp mcu/sc55_submcu.h
 	boards/sc88.cpp boards/sc88.h
+	boards/sc88Settings.cpp boards/sc88Settings.h
 	boards/sc8820.cpp boards/sc8820.h
 	boards/sc8850.cpp boards/sc8850.h
 	mcu/sc8850_submcu.cpp mcu/sc8850_submcu.h
@@ -113,6 +114,8 @@ if(BUILD_TESTING)
 	set_tests_properties(sc88_clone PROPERTIES SKIP_RETURN_CODE 77)
 	add_executable(sc88_settings_probe ${CMAKE_SOURCE_DIR}/tools/sc88_settings_probe.cpp)
 	target_link_libraries(sc88_settings_probe PRIVATE 88lib)
+	add_executable(sc88Settings_test tests/sc88Settings_test.cpp)
+	target_link_libraries(sc88Settings_test PRIVATE 88lib)
 	add_executable(hardwareSettings_test tests/hardwareSettings_test.cpp)
 	target_link_libraries(hardwareSettings_test PRIVATE 88lib)
 	add_test(NAME hardwareSettings COMMAND hardwareSettings_test)

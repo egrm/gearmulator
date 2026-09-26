@@ -51,6 +51,7 @@ namespace emu88Lib
 	class Sc88
 	{
 		friend struct Sc88ExecutionProbe;
+		friend class Sc88Settings;
 	public:
 
 		// External interrupt pins as this board wires them.
