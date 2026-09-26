@@ -46,6 +46,16 @@ set(HARDWARE_ASSETS
 	${HARDWARE_SKIN_DIR}/value_knob.png
 )
 juce_add_binary_data(88emuplayer_BinaryData SOURCES ${HARDWARE_ASSETS})
+set(playerFormats)
+set(playerPluginCode TscH)
+if(USE_Standalone)
+	list(APPEND playerFormats Standalone)
+endif()
+if(USE_VST3)
+	list(APPEND playerFormats VST3)
+	# Private fork identity; keep stable so saved projects survive future upstream merges.
+	set(playerPluginCode E88p)
+endif()
 juce_add_plugin(88emuplayer
 	# The 512px application icon supplies both ICNS and Windows ICO sizes.
 	ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.png"
@@ -58,8 +68,8 @@ juce_add_plugin(88emuplayer
 	EDITOR_WANTS_KEYBOARD_FOCUS TRUE
 	COPY_PLUGIN_AFTER_BUILD FALSE
 	PLUGIN_MANUFACTURER_CODE TusP
-	PLUGIN_CODE TscH
-	FORMATS Standalone
+	PLUGIN_CODE ${playerPluginCode}
+	FORMATS ${playerFormats}
 	PRODUCT_NAME "88emuPlayer"
 	PRODUCTS_FOLDER "${TUS_BIN_DIR}/plugins/$<CONFIG>"
 	BUNDLE_ID "com.theusualsuspects.SC88Hardware"
@@ -106,6 +116,38 @@ endif()
 # The standalone player needs its own install rule and CPack component. No macOS setup script: the
 # README explains how to allow the quarantined app and CLI in System Settings.
 set(playerProductName "88emuPlayer")
+set_target_properties(88emuplayer PROPERTIES
+	TUS_PRODUCT_NAME "${playerProductName}"
+	TUS_PLUGIN_FORMATS "${playerFormats}"
+	TUS_PLUGIN_IS_SYNTH TRUE
+	TUS_PLUGIN_4CC "${playerPluginCode}")
+tus_exportTarget(88emuplayer)
+tus_registerChangelog(88emuplayer)
+
+if(TARGET 88emuplayer_VST3)
+	# Match createJucePlugin's bundle installation and format aggregate target.
+	if(APPLE)
+		install(TARGETS 88emuplayer_VST3 DESTINATION . COMPONENT ${playerProductName}-VST3)
+		installMacSetupScript(. ${playerProductName}-VST3)
+	else()
+		get_target_property(vst3OutputFolder 88emuplayer_VST3 ARCHIVE_OUTPUT_DIRECTORY)
+		if(UNIX)
+			set(vst3Destination lib/vst3)
+			set(vst3Pattern "*.so")
+		else()
+			set(vst3Destination .)
+			set(vst3Pattern "*.vst3")
+		endif()
+		install(DIRECTORY ${vst3OutputFolder}/${playerProductName}.vst3
+			DESTINATION ${vst3Destination} COMPONENT ${playerProductName}-VST3
+			FILES_MATCHING PATTERN ${vst3Pattern} PATTERN "*.json")
+	endif()
+	add_dependencies(PluginFormat_VST3 88emuplayer_VST3)
+	addPluginTest(88emuplayer_VST3)
+	install(FILES "${CMAKE_SOURCE_DIR}/LICENSE.md" DESTINATION . COMPONENT ${playerProductName}-VST3)
+endif()
+
+if(TARGET 88emuplayer_Standalone)
 if(APPLE)
 	install(TARGETS 88emuplayer_Standalone DESTINATION . COMPONENT ${playerProductName}-Standalone)
 elseif(MSVC)
@@ -113,10 +155,6 @@ elseif(MSVC)
 else()
 	install(TARGETS 88emuplayer_Standalone RUNTIME DESTINATION bin/ COMPONENT ${playerProductName}-Standalone)
 endif()
-set_target_properties(88emuplayer PROPERTIES TUS_PRODUCT_NAME "${playerProductName}")
-tus_exportTarget(88emuplayer)
-# The generated changelog may be absent when this product has no entries.
-tus_registerChangelog(88emuplayer)
 install(FILES "${CMAKE_SOURCE_DIR}/LICENSE.md"
 	DESTINATION .
 	COMPONENT ${playerProductName}-Standalone)
@@ -149,6 +187,7 @@ if(APPLE OR WIN32)
 else()
 	install(TARGETS 88EmuCli RUNTIME DESTINATION bin COMPONENT ${playerProductName}-Standalone)
 endif()
+endif() # Standalone application and CLI
 if(BUILD_TESTING)
 	add_executable(88emuLaunchOptions_test tests/Emu88LaunchOptions_test.cpp app/Emu88LaunchOptions.cpp app/Emu88Playlist.cpp)
 	target_link_libraries(88emuLaunchOptions_test PRIVATE 88lib jucePlayerLib)
