@@ -77,6 +77,14 @@ namespace emu88Lib
 		constexpr uint16_t g_menuCursorStep = 0x10;
 		constexpr size_t g_maxMenuMoves =
 			(g_lastMenuCursor - g_firstMenuCursor) / g_menuCursorStep + 1;
+		// ROM 0C:9507/950D enters System page 1 with both MAP keys; 0C:954C
+		// exits. Page-1 handlers 0C:88FC/8908 and 0C:89CE/89E2..89F3
+		// move its separate cursor 4C68 by 0010 within 0000..00C0.
+		constexpr uint8_t g_systemPage = 1;
+		constexpr size_t g_systemCursor = 0x4c68;
+		constexpr uint16_t g_lastSystemCursor = 0xc0;
+		constexpr uint16_t g_systemCursorStep = 0x10;
+		constexpr size_t g_maxSystemMoves = g_lastSystemCursor / g_systemCursorStep;
 		constexpr uint8_t g_userInstrumentPage = 7;
 		// Same native press/gap timing as Sc88Pro::runFactoryReset, which drives
 		// the actual scanner rather than invoking firmware routines out of context.
@@ -159,6 +167,10 @@ namespace emu88Lib
 		const auto hasMenuCursor = savedMenuCursor <= g_lastMenuCursor &&
 		                           savedMenuCursor % g_menuCursorStep == uint16_t{};
 		if(savedPage == g_partEditPage && !hasMenuCursor) return Result::InvalidImage;
+		const auto savedSystemCursor = readWord(_image, g_systemCursor);
+		const auto hasSystemCursor = savedSystemCursor <= g_lastSystemCursor &&
+		                              savedSystemCursor % g_systemCursorStep == uint16_t{};
+		if(savedPage == g_systemPage && !hasSystemCursor) return Result::InvalidImage;
 		if(_board.m_samplesRendered != unsigned{})
 			return Result::RequiresFreshBoard;
 
@@ -209,6 +221,33 @@ namespace emu88Lib
 			}
 			if(savedPage != g_partEditPage)
 				pressPanel(_board, panelButton(Sc88ProButton::PartL) | panelButton(Sc88ProButton::PartR));
+		}
+		// The inactive System cursor normally survives boot. Only enter its menu
+		// when the active page needs redrawing or a valid remembered cursor differs.
+		const auto systemCursorNeedsRecall = hasSystemCursor &&
+			readWord(_board.m_sram, g_systemCursor) != savedSystemCursor;
+		if(savedPage == g_systemPage ||
+		   ((savedPage == g_normalPage || savedPage == g_userInstrumentPage) &&
+		    systemCursorNeedsRecall))
+		{
+			const auto systemChord = panelButton(Sc88ProButton::Sc55Map) |
+			                         panelButton(Sc88ProButton::Sc88Map);
+			if(_board.m_sram[g_panelPage] == g_systemPage) pressPanel(_board, systemChord);
+			pressPanel(_board, systemChord);
+			if(_board.m_sram[g_panelPage] != g_systemPage) return Result::InvalidImage;
+			if(hasSystemCursor)
+			{
+				for(size_t move{}; move < g_maxSystemMoves &&
+				    readWord(_board.m_sram, g_systemCursor) != savedSystemCursor; ++move)
+				{
+					const auto current = readWord(_board.m_sram, g_systemCursor);
+					pressPanel(_board, panelButton(current < savedSystemCursor ?
+						Sc88ProButton::Sc88Map : Sc88ProButton::Sc55Map));
+				}
+				if(readWord(_board.m_sram, g_systemCursor) != savedSystemCursor)
+					return Result::InvalidImage;
+			}
+			if(savedPage != g_systemPage) pressPanel(_board, systemChord);
 		}
 		if(savedPage == g_userInstrumentPage)
 			pressPanel(_board, panelButton(Sc88ProButton::UserInst));

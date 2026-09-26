@@ -90,6 +90,7 @@ static bool cloneJournalFixture = false;
 static bool cloneOrderingFixture = false;
 static bool panelRecallFixture = false;
 static bool panelMenuRecallFixture = false;
+static bool systemMenuRecallFixture = false;
 
 // Test stimuli for receive-state fields identified in the installed ROM's MIDI handlers.
 static const std::array<std::array<uint8_t,3>, 16> extraControllerEvents = {{
@@ -704,6 +705,75 @@ static int testPanelMenuRecall(const std::vector<uint8_t>& rom, const std::vecto
     return equal ? 0 : 1;
 }
 
+static void leaveSystemMenu(Sc88Pro& board)
+{
+    if(Sc88ProSettingsProbe::read(board,0x4b47) == 1)
+        press(board, (uint32_t{1} << unsigned(Sc88ProButton::Sc55Map)) |
+                     (uint32_t{1} << unsigned(Sc88ProButton::Sc88Map)));
+}
+
+static int testSystemMenuRecall(const std::vector<uint8_t>& rom, const std::vector<uint8_t>& waves)
+{
+    bool equal = true;
+    const auto menuChord = (uint32_t{1} << unsigned(Sc88ProButton::Sc55Map)) |
+                           (uint32_t{1} << unsigned(Sc88ProButton::Sc88Map));
+    for(unsigned scenario = 0; scenario < 2; ++scenario)
+    {
+        auto live = std::make_unique<Probe>(rom,waves);
+        run(*live,g_sampleRate * 10);
+        press(*live,uint32_t{1} << unsigned(Sc88ProButton::PartR));
+        // Manual p.36: both up/down enter System settings; one down selects
+        // Prevw Velo. ROM0C:9507/950D and 0C:89CE commit cursor4C68.
+        press(*live,menuChord);
+        press(*live,uint32_t{1} << unsigned(Sc88ProButton::Sc88Map));
+        screen(*live,"selected-system-entry");
+        std::cout << "system-menu-setup cursor=" << std::hex << ramWord(*live,0x4c68)
+                  << " page=" << unsigned(Sc88ProSettingsProbe::read(*live,0x4b47))
+                  << " part=" << ramWord(*live,0x4d78) << std::dec << '\n';
+        if(ramWord(*live,0x4c68) != 0x10 ||
+           Sc88ProSettingsProbe::read(*live,0x4b47) != 1 ||
+           ramWord(*live,0x4d78) != 1)
+            throw std::runtime_error("system menu fixture did not select Prevw Velo on A2");
+        if(scenario == 1) leaveSystemMenu(*live);
+        unsigned boundarySamples = 0;
+        while(!Sc88ProSettings::isCaptureBoundary(*live,false) && boundarySamples++ < g_sampleRate)
+            live->renderSample();
+        if(!Sc88ProSettings::isCaptureBoundary(*live,false))
+            throw std::runtime_error("system menu fixture failed to reach capture boundary");
+        std::vector<uint8_t> captured;
+        if(Sc88ProSettings::capture(*live,captured) != Sc88ProSettings::Result::Success)
+            throw std::runtime_error("system menu capture failed");
+        auto restored = std::make_unique<Probe>(rom,waves,false);
+        if(Sc88ProSettings::restore(*restored,captured) != Sc88ProSettings::Result::Success)
+            throw std::runtime_error("system menu restore failed");
+        std::cout << "system-menu-scenario=" << scenario << " saved-page="
+                  << unsigned(captured[0x4b47]) << '\n';
+        screen(*live,"original-system-context"); screen(*restored,"restored-system-context");
+        equal &= live->lcd().getDdRam() == restored->lcd().getDdRam();
+        {
+            auto before = live->cloneExecution(), after = restored->cloneExecution();
+            leaveSystemMenu(*before); leaveSystemMenu(*after);
+            equal &= compare(dump(*before),dump(*after),"system-menu-preclick-parameters");
+        }
+        for(Sc88Pro* board : {static_cast<Sc88Pro*>(live.get()),static_cast<Sc88Pro*>(restored.get())})
+            if(Sc88ProSettingsProbe::read(*board,0x4b47) != 1)
+                press(*board,menuChord);
+        std::cout << "system-cursor-before-next-click=" << std::hex
+                  << ramWord(*live,0x4c68) << '/' << ramWord(*restored,0x4c68)
+                  << std::dec << '\n';
+        if(ramWord(*live,0x4c68) != 0x10)
+            throw std::runtime_error("native firmware did not remember System cursor");
+        equal &= ramWord(*live,0x4c68) == ramWord(*restored,0x4c68);
+        press(*live,uint32_t{1} << unsigned(Sc88ProButton::InstR));
+        press(*restored,uint32_t{1} << unsigned(Sc88ProButton::InstR));
+        screen(*live,"original-system-next-click"); screen(*restored,"restored-system-next-click");
+        equal &= live->lcd().getDdRam() == restored->lcd().getDdRam();
+        leaveSystemMenu(*live); leaveSystemMenu(*restored);
+        equal &= compare(dump(*live),dump(*restored),"system-menu-postclick-parameters");
+    }
+    return equal ? 0 : 1;
+}
+
 static int traceIdleBoundary(Probe& board)
 {
     // Source candidate: dispatcher empty-ready-queue loop00:065B/065F/0662.
@@ -1043,6 +1113,7 @@ static int runProbe(int argc, char** argv)
         else if(option == "--panel-clone") panelCloneFixture = true;
         else if(option == "--panel-recall") panelRecallFixture = true;
         else if(option == "--panel-menu-recall") panelMenuRecallFixture = true;
+        else if(option == "--system-menu-recall") systemMenuRecallFixture = true;
         else if(option == "--idle-boundary") idleBoundaryFixture = true;
         else if(option == "--journal-replay") journalFixture = true;
         else if(option == "--journal-ordering") journalOrderingFixture = true;
@@ -1075,6 +1146,7 @@ static int runProbe(int argc, char** argv)
     if(panelCloneFixture) return testPanelClone(rom, waves);
     if(panelRecallFixture) return testPanelRecall(rom, waves);
     if(panelMenuRecallFixture) return testPanelMenuRecall(rom, waves);
+    if(systemMenuRecallFixture) return testSystemMenuRecall(rom, waves);
     if(panelBoundaryFixture)
     {
         const bool pressed = tracePanelBoundary(source, uint32_t{1} << unsigned(Sc88ProButton::LevelR), "level-down");
