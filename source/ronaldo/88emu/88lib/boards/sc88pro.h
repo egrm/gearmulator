@@ -16,6 +16,7 @@
 #include "custom_chips/xp/xp.h"
 
 #include "synthLib/midiTypes.h"
+#include "baseLib/md5.h"
 
 namespace emu88Lib
 {
@@ -216,6 +217,7 @@ namespace emu88Lib
 		}
 
 	private:
+		friend class Sc88ProSettings;
 		// Set up the bus map and the chip's host hooks. Runs once, from the
 		// constructor.
 		void    wireChip();
@@ -245,6 +247,7 @@ namespace emu88Lib
 		BoardBus       m_boardBus {*this};
 
 		std::vector<uint8_t> m_rom;
+		const baseLib::MD5 m_firmwareHash;
 		std::vector<uint8_t> m_sram = std::vector<uint8_t>(SramSize, 0);
 		std::vector<uint8_t> m_waveRom;
 

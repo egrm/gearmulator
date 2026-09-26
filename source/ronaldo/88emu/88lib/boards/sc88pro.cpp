@@ -37,6 +37,7 @@ namespace emu88Lib
 	Sc88Pro::Sc88Pro(std::vector<uint8_t> _firmware, const std::vector<uint8_t>& _waveRom,
 	                 const bool _factoryReset)
 		: m_rom(std::move(_firmware))
+		, m_firmwareHash(m_rom)
 		, m_waveRom(decodeWaveRom(_waveRom))
 		, m_xp()
 		, m_subMcu([this](Sc88SubMcu::Record&& _r) { m_midiInQueue.emplace_back(std::move(_r)); },

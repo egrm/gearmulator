@@ -29,6 +29,7 @@ set(SOURCES
 	boards/sc88types.h
 	mcu/sc88_submcu.cpp mcu/sc88_submcu.h
 	boards/sc88pro.cpp boards/sc88pro.h
+	boards/sc88proSettings.cpp boards/sc88proSettings.h
 )
 
 target_sources(88lib PRIVATE ${SOURCES})
@@ -105,6 +106,12 @@ if(NOT MSVC)
 endif()
 
 if(BUILD_TESTING)
+	add_executable(sc88proSettings_test tests/sc88proSettings_test.cpp)
+	target_link_libraries(sc88proSettings_test PRIVATE 88lib)
+	add_test(NAME sc88proSettings COMMAND sc88proSettings_test)
+	set_tests_properties(sc88proSettings PROPERTIES SKIP_RETURN_CODE 77)
+	set_property(TARGET sc88proSettings_test PROPERTY FOLDER "Ronaldo/tests")
+
 	add_executable(sc88pro_state_probe ${CMAKE_SOURCE_DIR}/tools/sc88pro_state_probe.cpp)
 	target_link_libraries(sc88pro_state_probe PRIVATE 88lib)
 	set_property(TARGET sc88pro_state_probe PROPERTY FOLDER "Ronaldo/tests")
