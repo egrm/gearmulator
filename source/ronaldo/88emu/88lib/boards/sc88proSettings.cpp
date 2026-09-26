@@ -67,6 +67,11 @@ namespace emu88Lib
 		// the actual scanner rather than invoking firmware routines out of context.
 		constexpr unsigned g_panelPressSamples = g_sampleRate / 10;
 		constexpr unsigned g_panelReleaseSamples = g_sampleRate / 4;
+		// Firmware 0C:76B6..771D walks the 32 level-meter decay counters
+		// backwards from 4ACB; 0C:5BFA decrements them on the display timer.
+		// These are animation history, not sound settings. Reusing their remaining
+		// ticks changes boot task timing and consequently the fresh DSP history.
+		constexpr size_t g_levelMeterCountdownBase = 0x4aac;
 
 		void pressPanel(Sc88Pro& board, const uint32_t buttons)
 		{
@@ -155,6 +160,7 @@ namespace emu88Lib
 		refresh.sysex.push_back(g_sysexEnd);
 
 		_board.m_sram = _image;
+		std::fill_n(_board.m_sram.begin() + g_levelMeterCountdownBase, g_partCount, uint8_t{});
 		for(unsigned sample{}; sample < g_bootSamples; ++sample) _board.renderSample();
 		// Reconstruct selection through normal firmware actions. This regenerates
 		// descriptor targets and screen contents on the fresh timeline. Do it before

@@ -62,12 +62,23 @@ namespace emu88Lib
             const auto& regs = board.m_machine.cpu().regs();
             return (uint32_t(regs.cp) << 16) | regs.pc;
         }
+        static uint32_t effectWord(const Sc88Pro& board, unsigned address)
+        {
+            return board.m_lsp.readIram(address);
+        }
+        static void clearEffectHistory(Sc88Pro& board)
+        {
+            board.m_lsp.runtime().clear();
+        }
     };
 }
 
 static bool withoutPortamento = false;
 static bool effectControllerFixture = false;
 static bool activeCaptureFixture = false;
+static bool activeIsolationFixture = false;
+static bool activeResetHistoryFixture = false;
+static bool meterHistoryFixture = false;
 static bool panelBoundaryFixture = false;
 static bool useProductionAdapter = false;
 static bool panelCloneFixture = false;
@@ -918,6 +929,9 @@ static int runProbe(int argc, char** argv)
         if(option == "--without-portamento") withoutPortamento = true;
         else if(option == "--efx-controller") effectControllerFixture = true;
         else if(option == "--active-capture") activeCaptureFixture = true;
+        else if(option == "--active-isolate") { activeCaptureFixture = true; activeIsolationFixture = true; }
+        else if(option == "--active-reset-history") { activeCaptureFixture = true; activeResetHistoryFixture = true; }
+        else if(option == "--meter-history") { activeCaptureFixture = true; meterHistoryFixture = true; }
         else if(option == "--panel-boundary") panelBoundaryFixture = true;
         else if(option == "--production-adapter") useProductionAdapter = true;
         else if(option == "--panel-clone") panelCloneFixture = true;
@@ -1027,10 +1041,77 @@ static int runProbe(int argc, char** argv)
             return board;
         };
         auto silent = restore(beforeNotes), restoredActive = restore(whileSounding);
+        size_t coefficientDifferences = 0;
+        for(unsigned address = lspLib::IramProgramBase; address < lspLib::HostIramSize; ++address)
+            if(Sc88ProSettingsProbe::effectWord(*silent,address) != Sc88ProSettingsProbe::effectWord(*restoredActive,address))
+            {
+                ++coefficientDifferences;
+                std::cout << "active-efx-coefficient " << std::hex << address << '='
+                    << Sc88ProSettingsProbe::effectWord(*silent,address) << '/'
+                    << Sc88ProSettingsProbe::effectWord(*restoredActive,address) << std::dec << '\n';
+            }
+        std::cout << "active-efx-coefficient-differences=" << coefficientDifferences << '\n';
+        for(unsigned address = 0; address < beforeNotes.size(); ++address)
+            if(beforeNotes[address] != whileSounding[address] &&
+               (address >= 0x4600 && address < 0x4666 || address >= 0xc660 && address < 0xca40))
+                std::cout << "active-image-control-diff " << std::hex << address << '='
+                    << unsigned(beforeNotes[address]) << '/' << unsigned(whileSounding[address]) << std::dec << '\n';
+        controllers(*silent,"silent-restored"); controllers(*restoredActive,"active-restored");
+        extraState(*silent,"silent-restored"); extraState(*restoredActive,"active-restored");
+        if(activeResetHistoryFixture)
+        {
+            Sc88ProSettingsProbe::clearEffectHistory(*silent);
+            Sc88ProSettingsProbe::clearEffectHistory(*restoredActive);
+        }
         const auto silentAudio = renderIdle(*silent), restoredAudio = renderIdle(*restoredActive);
+        bool meterHistoryEqual = true;
+        if(meterHistoryFixture)
+        {
+            // ROM0C:76B6..771D identifies exactly32 independent meter countdowns.
+            // Perturb each independently so a combined change cannot hide a dependency.
+            for(unsigned meter = 0; meter < 32; ++meter)
+            {
+                auto changedHistory = beforeNotes;
+                changedHistory[0x4aac + meter] ^= 0xff;
+                auto candidate = restore(changedHistory);
+                const auto candidateAudio = renderIdle(*candidate);
+                const auto label = "meter-countdown-" + std::to_string(meter);
+                meterHistoryEqual &= compareAudio(silentAudio, candidateAudio, label.c_str());
+            }
+        }
+        if(activeIsolationFixture)
+        {
+            auto duplicate = restore(beforeNotes);
+            const auto duplicateAudio = renderIdle(*duplicate);
+            if(!compareAudio(silentAudio, duplicateAudio, "active-isolation-identical-image-control"))
+                throw std::runtime_error("identical image restore is nondeterministic; image bisection invalid");
+            std::deque<std::pair<unsigned,unsigned>> ranges{{0, Sc88Pro::SramSize}};
+            unsigned restoreCount = 0;
+            while(!ranges.empty())
+            {
+                const auto [begin,end] = ranges.front(); ranges.pop_front();
+                auto candidateImage = beforeNotes;
+                std::copy(whileSounding.begin()+begin, whileSounding.begin()+end, candidateImage.begin()+begin);
+                if(candidateImage == beforeNotes) continue;
+                if(++restoreCount > 64) throw std::runtime_error("active isolation diagnostic restore budget exhausted");
+                auto candidate = restore(candidateImage);
+                const bool differs = renderIdle(*candidate) != silentAudio;
+                std::cout << "active-isolation-range " << std::hex << begin << ':' << end << std::dec
+                          << " differs=" << differs << '\n' << std::flush;
+                if(!differs) continue;
+                if(end-begin == 1)
+                {
+                    std::cout << "active-isolation-byte " << std::hex << begin << '='
+                              << unsigned(beforeNotes[begin]) << '/' << unsigned(whileSounding[begin]) << std::dec << '\n';
+                    continue;
+                }
+                const unsigned middle = begin+(end-begin)/2;
+                ranges.emplace_back(begin,middle); ranges.emplace_back(middle,end);
+            }
+        }
         compareAudio(soundingAudio, silentAudio, "sounding-source-vs-silent-reference");
         const bool silentEqual = compareAudio(silentAudio, restoredAudio, "active-capture-restores-silent");
-        return soundingAudio != silentAudio && silentEqual ? 0 : 1;
+        return soundingAudio != silentAudio && silentEqual && meterHistoryEqual ? 0 : 1;
     }
     if(source.extRead8(0xc0c6a2) != 17 || source.extRead8(0xc0c6e2) != 63 ||
        source.extRead8(0xc0c723) != 91 || (source.extRead8(0xc0d5bc) & 0xe0) != (withoutPortamento ? 0xc0 : 0xe0) ||
@@ -1124,37 +1205,44 @@ static int runProbe(int argc, char** argv)
     compareAudio(referenceAudio, correctedAudioA, "source-vs-corrected");
     const auto makeFirmwareReference = [&](bool redundant)
     {
-    auto firmwareReference = std::make_unique<Probe>(rom, waves, false);
-    for(unsigned index = 0; index < sram.size(); ++index) firmwareReference->extWrite8(0xc00000 + index, sram[index]);
-    run(*firmwareReference, 32000 * 10);
-    // Reconstruct this fixture's nondefault transient controls using firmware MIDI handlers,
-    // then render at the same emulated boot timeline as the direct-controller-overlay candidate.
-    for(const auto bytes : {std::array<uint8_t,3>{0xe0,23,71}, {0xb0,1,43}, {0xb0,11,99}})
-    {
-        synthLib::SMidiEvent event(synthLib::MidiEventSource::Host);
-        event.a = bytes[0]; event.b = bytes[1]; event.c = bytes[2];
-        firmwareReference->addMidiEvent(event, 0);
-    }
-    // B16's Rx.NRPN is OFF: the handler clears only its selector, retaining FF parameters.
-    // This reestablishes the captured inactive selector without injecting Data Entry/settings.
-    synthLib::SMidiEvent inactiveSelector(synthLib::MidiEventSource::Host);
-    inactiveSelector.a = 0xbf; inactiveSelector.b = 99; inactiveSelector.c = 0;
-    firmwareReference->addMidiEvent(inactiveSelector, 1);
-    for(const auto bytes : extraControllerEvents)
-    {
-        if(withoutPortamento && (bytes[1] == 65 || bytes[1] == 84)) continue;
-        synthLib::SMidiEvent event(synthLib::MidiEventSource::Host);
-        event.a = bytes[0]; event.b = bytes[1]; event.c = bytes[2];
-        firmwareReference->addMidiEvent(event, 0);
-    }
-    if(redundant)
-    {
-        synthLib::SMidiEvent duplicate(synthLib::MidiEventSource::Host);
-        duplicate.a = 0xb0; duplicate.b = 5; duplicate.c = 63;
-        firmwareReference->addMidiEvent(duplicate, 0);
-    }
-    run(*firmwareReference, 32000);
-    return firmwareReference;
+        auto firmwareReference = std::make_unique<Probe>(rom, waves, false);
+        for(unsigned index = 0; index < sram.size(); ++index) firmwareReference->extWrite8(0xc00000 + index, sram[index]);
+        // The independent native-MIDI reference must start with fresh animation
+        // history too: ROM0C:76B6..771D identifies these32 meter countdowns.
+        // Leaving old ticks here would compare different boot scheduling histories,
+        // despite identical settings. Sound/controller restoration remains native MIDI.
+        if(useProductionAdapter)
+            for(unsigned meter = 0; meter < 32; ++meter)
+                firmwareReference->extWrite8(0xc04aac + meter, 0);
+        run(*firmwareReference, 32000 * 10);
+        // Reconstruct this fixture's nondefault transient controls using firmware MIDI handlers,
+        // then render at the same emulated boot timeline as the direct-controller-overlay candidate.
+        for(const auto bytes : {std::array<uint8_t,3>{0xe0,23,71}, {0xb0,1,43}, {0xb0,11,99}})
+        {
+            synthLib::SMidiEvent event(synthLib::MidiEventSource::Host);
+            event.a = bytes[0]; event.b = bytes[1]; event.c = bytes[2];
+            firmwareReference->addMidiEvent(event, 0);
+        }
+        // B16's Rx.NRPN is OFF: the handler clears only its selector, retaining FF parameters.
+        // This reestablishes the captured inactive selector without injecting Data Entry/settings.
+        synthLib::SMidiEvent inactiveSelector(synthLib::MidiEventSource::Host);
+        inactiveSelector.a = 0xbf; inactiveSelector.b = 99; inactiveSelector.c = 0;
+        firmwareReference->addMidiEvent(inactiveSelector, 1);
+        for(const auto bytes : extraControllerEvents)
+        {
+            if(withoutPortamento && (bytes[1] == 65 || bytes[1] == 84)) continue;
+            synthLib::SMidiEvent event(synthLib::MidiEventSource::Host);
+            event.a = bytes[0]; event.b = bytes[1]; event.c = bytes[2];
+            firmwareReference->addMidiEvent(event, 0);
+        }
+        if(redundant)
+        {
+            synthLib::SMidiEvent duplicate(synthLib::MidiEventSource::Host);
+            duplicate.a = 0xb0; duplicate.b = 5; duplicate.c = 63;
+            firmwareReference->addMidiEvent(duplicate, 0);
+        }
+        run(*firmwareReference, 32000);
+        return firmwareReference;
     };
     auto firmwareReference = makeFirmwareReference(false);
     auto coefficientReference = makeFirmwareReference(false);
