@@ -19,9 +19,9 @@ namespace emu88Lib
 		Digest firmware{};
 		std::vector<uint8_t> memory;
 
-		// Uses the same versioned chunk writer as the existing instrument processors.
+		// Versioned ChunkWriter-compatible layout with explicit little-endian fields.
 		std::vector<uint8_t> encode() const;
-		// Preflights all lengths before the shared reader can allocate a vector.
+		// Preflights lengths and supports the original Windows version-1 representation.
 		static std::optional<SettingsChunk> decode(const void* _data, size_t _size);
 	};
 }
