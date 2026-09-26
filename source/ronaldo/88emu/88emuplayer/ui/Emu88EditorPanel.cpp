@@ -102,8 +102,8 @@ namespace emu88Player
 			// detent steps the value by ten (four detents moved the instrument
 			// from 001 to 041 on the board). So a drag must turn the encoder
 			// without pushing it. Only a click that did not move pushes, as a
-			// pulse long enough for the panel scan, started after the
-			// document-wide mouseup has released the pointer buttons.
+			// processor-owned pulse. Register both edges immediately so Save can
+			// include an accepted click before another UI callback has run.
 			juceRmlUi::EventListener::Add(value, Rml::EventId::Mousedown, [this](Rml::Event& _event)
 			{
 				const auto position = juceRmlUi::helper::getMousePos(_event);
@@ -119,18 +119,12 @@ namespace emu88Player
 				const auto dy = position.y - m_valueKnobDownY;
 				if(dx * dx + dy * dy > kValuePushClickRadius * kValuePushClickRadius)
 					return;
-				constexpr auto valuePush = static_cast<uint32_t>(emu88Lib::Sc8850Button::ValuePush);
-				const juce::WeakReference<Editor> safeThis(this);
-				juce::Timer::callAfterDelay(1, [safeThis]
-				{
-					if(auto* editor = safeThis.get())
-						editor->setPointerButton(valuePush, true);
-				});
-				juce::Timer::callAfterDelay(1 + kValuePushPulseMs, [safeThis]
-				{
-					if(auto* editor = safeThis.get())
-						editor->setPointerButton(valuePush, false);
-				});
+				constexpr auto valuePush = uint32_t{1} << static_cast<uint32_t>(emu88Lib::Sc8850Button::ValuePush);
+				const auto released = panelButtonsForDevice(m_processor.deviceModel(), m_keyboardButtons);
+				m_pointerButtons = 0;
+				m_sentButtons = m_keyboardButtons;
+				m_processor.clickPanelButton(released | valuePush, released);
+				updateButtonVisuals();
 			});
 		}
 		refreshButtonElements(m_processor.deviceModel());
@@ -180,8 +174,7 @@ namespace emu88Player
 			if(emu88Lib::hasPanelKnob(model) && (key == g_mt32KnobUpKey || key == g_mt32KnobDownKey))
 			{
 				// The knob is a potentiometer: every press moves it a notch and it stays there.
-				if(auto* hardware = m_processor.hardware())
-					hardware->turnPanelEncoder(key == g_mt32KnobUpKey ? 1 : -1);
+				m_processor.turnPanelEncoder(key == g_mt32KnobUpKey ? 1 : -1);
 				_event.StopPropagation();
 				return;
 			}
@@ -268,8 +261,7 @@ namespace emu88Player
 					if(delta > encoderRange / 2) delta -= encoderRange;
 					else if(delta < -encoderRange / 2) delta += encoderRange;
 					last = current;
-					if(auto* hardware = m_processor.hardware())
-						hardware->turnPanelEncoder(delta);
+					m_processor.turnPanelEncoder(delta);
 				});
 		}
 		refreshLedElements(m_processor.deviceModel());
@@ -340,8 +332,7 @@ namespace emu88Player
 		if(buttons == m_sentButtons)
 			return;
 		m_sentButtons = buttons;
-		if(auto* hardware = m_processor.hardware())
-			hardware->setPanelButtons(panelButtonsForDevice(m_processor.deviceModel(), buttons));
+		m_processor.setPanelButtons(panelButtonsForDevice(m_processor.deviceModel(), buttons));
 	}
 
 	void Editor::refreshButtonElements(const emu88Lib::DeviceModel _model)

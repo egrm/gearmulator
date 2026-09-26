@@ -23,6 +23,24 @@ synthLib::Resampler::~Resampler()
 	destroyResamplers();
 }
 
+std::unique_ptr<synthLib::Resampler> synthLib::Resampler::cloneExecution() const
+{
+	auto result = std::make_unique<Resampler>(m_samplerateIn, m_samplerateOut, m_mode);
+	result->m_inputLen = m_inputLen;
+	// libresample/src/resample.c::resample_dup copies every filter and stream field.
+	for(const auto* handle : m_resamplerOut)
+		result->m_resamplerOut.push_back(handle ? resample_dup(handle) : nullptr);
+	for(const auto& filter : m_mameResamplerOut)
+		result->m_mameResamplerOut.push_back(filter ? filter->clone() : nullptr);
+	result->m_mameTempOutput = m_mameTempOutput;
+	result->m_mameInputTemp = m_mameInputTemp;
+	result->m_mameSourceBaseSample = m_mameSourceBaseSample;
+	result->m_mameDestSample = m_mameDestSample;
+	result->m_tempOutput = m_tempOutput;
+	// process() fills output pointers from its caller on every invocation.
+	return result;
+}
+
 void synthLib::Resampler::clearHistory()
 {
 	for(auto* resampler : m_resamplerOut)

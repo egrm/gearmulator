@@ -2,6 +2,7 @@
 #include "device.h"
 
 #include <cmath>
+#include <stdexcept>
 
 #include "baseLib/os.h"
 
@@ -9,6 +10,69 @@ using namespace synthLib;
 
 namespace synthLib
 {
+	std::unique_ptr<Plugin> Plugin::cloneForCapture(Device* clonedDevice) const
+	{
+		// Match addMidiEvent's overflow lock order. The external processor lock excludes render.
+		std::lock_guard inputLock(m_lockAddMidiEvent);
+		std::lock_guard lock(m_lock);
+		if(m_midiClockEnabled || m_device->getChannelCountIn() != uint32_t{})
+			throw std::runtime_error("Capture requires a MIDI-clock-disabled instrument without audio inputs");
+		auto copy = std::make_unique<Plugin>(clonedDevice, [](Device*) { return nullptr; });
+		copy->m_midiClockEnabled = false;
+		copy->m_midiIn = m_midiIn;
+		for(size_t index{}; index < m_midiInRingBuffer.size(); ++index)
+			copy->m_midiInRingBuffer.push_back(m_midiInRingBuffer[index]);
+		copy->m_pendingSysexInput = m_pendingSysexInput;
+		copy->m_resampler.copyExecutionFrom(m_resampler);
+		copy->m_hostSamplerate = m_hostSamplerate;
+		copy->m_hostSamplerateInv = m_hostSamplerateInv;
+		copy->m_blockSize = m_blockSize;
+		copy->m_lastSampleCount = m_lastSampleCount;
+		copy->m_deviceSamplerate = m_deviceSamplerate;
+		copy->m_extraLatencyBlocks = m_extraLatencyBlocks;
+		copy->m_transportGeneration.store(m_transportGeneration.load());
+		// Pending rates remain deferred just as in the live stream; capture does not pump UI.
+		copy->m_pendingDeviceSamplerate.store(m_pendingDeviceSamplerate.load());
+		return copy;
+	}
+
+	bool Plugin::hasPendingCaptureInput() const
+	{
+		return !m_midiIn.empty() || !m_midiInRingBuffer.empty() || m_resampler.hasPendingMidi();
+	}
+
+	size_t Plugin::captureInputQuantum() const
+	{
+		// Pending offsets belong to the next host block. Reuse the last actual block
+		// extent (maximum prepared extent before first Process), never a one-frame
+		// probe that would clamp every accepted event onto the same native sample.
+		constexpr size_t minimumFrame = 1;
+		auto quantum = std::max(minimumFrame, m_lastSampleCount ? m_lastSampleCount : m_blockSize);
+		for(const auto& event : m_midiIn) quantum = std::max(quantum, static_cast<size_t>(event.offset) + minimumFrame);
+		for(size_t index{}; index < m_midiInRingBuffer.size(); ++index)
+			quantum = std::max(quantum, static_cast<size_t>(m_midiInRingBuffer[index].offset) + minimumFrame);
+		return quantum;
+	}
+
+	void Plugin::processCapture(const size_t samples)
+	{
+		// Continue existing stream conversion, without fabricating host transport transitions.
+		processMidiInEvents();
+		TAudioInputs inputs{};
+		TAudioOutputs outputs{};
+		std::vector<float> discarded(samples);
+		outputs.fill(discarded.data());
+		if(m_hostSamplerate > float{})
+			m_resampler.process(inputs, outputs, m_midiIn, m_midiOut, static_cast<uint32_t>(samples),
+				[this](const TAudioInputs& in, const TAudioOutputs& out, size_t count,
+				       const std::vector<SMidiEvent>& midi, std::vector<SMidiEvent>& result)
+				{ m_device->process(in, out, count, midi, result); });
+		else
+			// Before Prepare there is no host timeline: queued control events are native offsets.
+			m_device->process(inputs, outputs, samples, m_midiIn, m_midiOut);
+		m_midiIn.clear();
+		m_midiOut.clear();
+	}
 	constexpr uint8_t g_stateVersion = 1;
 
 	Plugin::Plugin(Device* _device, CallbackDeviceInvalid _callbackDeviceInvalid)

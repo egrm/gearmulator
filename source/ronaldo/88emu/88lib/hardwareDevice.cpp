@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
 
 namespace emu88Lib
 {
@@ -115,6 +116,8 @@ namespace emu88Lib
 			auto roms = RomLoader::findSc88ProRomSet(RomLoader::toRomDevice(m_model));
 			if(!roms.isValid()) break;
 			if(_settings && _settings->firmware != baseLib::MD5(roms.firmware).getWords()) break;
+			for(const auto* image : {&roms.firmware, &roms.waveA, &roms.waveB, &roms.waveC})
+				m_assetDigests.push_back(baseLib::MD5(*image).getWords());
 			std::vector<uint8_t> waves;
 			waves.reserve(Sc88ProRomSet::WaveSize);
 			for(const auto* chip : {&roms.waveA, &roms.waveB, &roms.waveC})
@@ -253,6 +256,80 @@ namespace emu88Lib
 	}
 
 	HardwareDevice::~HardwareDevice() = default;
+
+	HardwareDevice::HardwareDevice(const HardwareDevice& source, CaptureTag)
+		: synthLib::Device(source.getDeviceCreateParams()), m_model(source.m_model)
+	{
+		if(m_model != DeviceModel::Sc88Pro || !source.m_sc88Pro)
+			throw std::runtime_error("Settings capture adapter unavailable for this model");
+		m_sc88Pro = source.m_sc88Pro->cloneExecution();
+		m_assetDigests = source.m_assetDigests;
+		if(!m_sc88Pro) throw std::runtime_error("Exact board clone rejected");
+		m_midiIn = source.m_midiIn;
+		m_sc88ProMidiOut = source.m_sc88ProMidiOut;
+		m_sc88ProMidiOutOffsets = source.m_sc88ProMidiOutOffsets;
+		m_panelCommands = source.m_panelCommands;
+		{
+			std::lock_guard lock(source.m_panelMutex);
+			m_pendingPanelCommands = source.m_pendingPanelCommands;
+		}
+		m_nextPanelCommandSample = source.m_nextPanelCommandSample;
+		m_renderedSamples = source.m_renderedSamples;
+		m_transportGeneration = source.m_transportGeneration;
+		m_activeChannels = source.m_activeChannels;
+		m_heldChannels = source.m_heldChannels;
+		m_selectedAnalogModel = source.m_selectedAnalogModel;
+		m_analogOutput.setModel(source.m_analogOutput.model(), dacSamplerate());
+		m_holdPhase = source.m_holdPhase;
+		m_heldFrame = source.m_heldFrame;
+		m_dacBits = source.m_dacBits;
+		m_boardGain = source.m_boardGain;
+		// Analog audio history cannot influence firmware. Its exact hold phase can.
+	}
+
+	std::unique_ptr<HardwareDevice> HardwareDevice::cloneForCapture() const
+	{
+		return std::unique_ptr<HardwareDevice>(new HardwareDevice(*this, CaptureTag{}));
+	}
+
+	bool HardwareDevice::isSettingsBoundary() const
+	{
+		std::lock_guard lock(m_panelMutex);
+		return m_sc88Pro && m_midiIn.empty() && m_panelCommands.empty() && m_pendingPanelCommands.empty() &&
+		       Sc88ProSettings::isCaptureBoundary(*m_sc88Pro, true);
+	}
+
+	SettingsChunk HardwareDevice::captureSettings() const
+	{
+		if(!isSettingsBoundary()) throw std::runtime_error("Firmware has not acknowledged all accepted input");
+		SettingsChunk result;
+		result.model = m_model;
+		result.layout = Sc88ProSettings::LayoutVersion;
+		result.firmware = m_sc88Pro->firmwareHash().getWords();
+		if(Sc88ProSettings::capture(*m_sc88Pro, result.memory) != Sc88ProSettings::Result::Success)
+			throw std::runtime_error("Settings adapter unavailable for firmware fingerprint");
+		return result;
+	}
+
+	void HardwareDevice::advanceCaptureFrame()
+	{
+		// Once upstream input is delivered, the native output timeline alone determines
+		// firmware acknowledgment. Null audio sinks still advance oversampling hold phase.
+		constexpr size_t oneOutputSample = 1;
+		processAudio({}, {}, oneOutputSample);
+		m_midiOut.clear();
+	}
+
+	void HardwareDevice::clickPanelButton(const uint32_t pressedButtons, const uint32_t releasedButtons)
+	{
+		std::lock_guard lock(m_panelMutex);
+		// Preserve the existing editor's 80 ms SC-8850 VALUE push, now in native time.
+		// Emu88EditorPanel.cpp previously used kValuePushPulseMs for this gesture.
+		constexpr float valuePushSeconds = 0.08f;
+		const auto hold = m_sc8850 ? static_cast<uint64_t>(dacSamplerate() * valuePushSeconds) : uint64_t{};
+		m_pendingPanelCommands.push_back({PanelCommandType::Buttons, static_cast<int32_t>(pressedButtons), hold});
+		m_pendingPanelCommands.push_back({PanelCommandType::Buttons, static_cast<int32_t>(releasedButtons)});
+	}
 
 	bool HardwareDevice::isPcmCardImage(const std::vector<uint8_t>& _image)
 	{
@@ -479,6 +556,9 @@ namespace emu88Lib
 	{
 		if(m_panelCommands.empty() || m_renderedSamples < m_nextPanelCommandSample)
 			return;
+		// The audited Pro firmware must consume an edge before receiving its successor.
+		// This identical path runs on live hardware and its exact private capture clone.
+		if(m_sc88Pro && !Sc88ProSettings::isCaptureBoundary(*m_sc88Pro, true)) return;
 		const auto command = m_panelCommands.front();
 		m_panelCommands.pop_front();
 		if(command.type == PanelCommandType::Buttons)
@@ -490,7 +570,8 @@ namespace emu88Lib
 			else if(m_sc55) m_sc55->setButtons(buttons);
 			else if(m_la) m_la->setButtons(buttons);
 			else if(m_cm64) m_cm64->setButtons(buttons);
-			m_nextPanelCommandSample = m_renderedSamples + g_minimumPanelEdgeSamples;
+			m_nextPanelCommandSample = m_renderedSamples +
+				std::max(command.minimumHoldSamples, m_sc88Pro ? uint64_t{} : g_minimumPanelEdgeSamples);
 		}
 		else if(m_sc8850)
 		{

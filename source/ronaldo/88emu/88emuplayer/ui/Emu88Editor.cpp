@@ -43,9 +43,14 @@ namespace emu88Player
 		// An offline render sizes the editor itself, to the video resolution it was asked for, and
 		// has neither a message loop to run the timer nor a screen to put a notice on.
 		if(m_offline)
+		{
+			m_syncingEditor = false;
 			return;
+		}
 
 		setGuiScale(juce::jlimit(50, 300, m_processor.config().getIntValue("scale", 100)));
+		m_restoredStateRevision = m_processor.restoredStateRevision();
+		m_syncingEditor = false;
 		startTimerHz(30);
 
 		const juce::WeakReference<Editor> safeThis(this);
@@ -136,11 +141,15 @@ namespace emu88Player
 			m_rml->setBounds(getLocalBounds());
 		// An offline render picks the editor's size from the video resolution, which is nothing
 		// the window should remember.
-		if(m_offline || m_settingGuiScale || getWidth() <= 0)
+		if(m_offline || m_syncingEditor || m_settingGuiScale || getWidth() <= 0)
 			return;
 		const auto scale = juce::roundToInt(100.0 * static_cast<double>(getWidth()) / g_defaultWidth);
+		const juce::ScopedLock lock(m_processor.getCallbackLock());
+		const bool changed = m_processor.config().getIntValue("scale") != scale;
 		m_processor.config().setValue("scale", scale);
 		m_processor.config().saveIfNeeded();
+		if(changed)
+			m_processor.notifyStateChanged();
 	}
 
 	void Editor::openContextMenu(Rml::Event& _event)
@@ -488,11 +497,26 @@ namespace emu88Player
 	{
 		if(!m_rml)
 			return;
-		auto* hardware = m_processor.hardware();
+		const auto restoredRevision = m_processor.restoredStateRevision();
+		if(restoredRevision != m_restoredStateRevision)
+		{
+			const juce::ScopedValueSetter<bool> syncing(m_syncingEditor, true);
+			m_restoredStateRevision = restoredRevision;
+			// The new hardware owns its restored state; old mouse/key gestures do not.
+			m_pointerButtons = m_keyboardButtons = m_sentButtons = 0;
+			m_powerKeyDown = false;
+			loadSkin(readSkinFromConfig());
+			setGuiScale(juce::jlimit(50, 300, m_processor.config().getIntValue("scale", 100)));
+			if(m_settingsWindow)
+				reopenSettings("pageSettingsGeneral", "btSettingsGeneral");
+			m_displayRevision = 0;
+		}
+		if(!m_rml)
+			return;
 		const auto playlistRevision = m_processor.midiPlayer().playlistRevision();
 		const auto playerStatus = m_processor.midiPlayer().status();
-		const auto snapshot = hardware ? hardware->displaySnapshot()
-		                               : emu88Lib::HardwareDevice::DisplaySnapshot{};
+		const auto snapshot = m_processor.hardwareDisplaySnapshot().value_or(
+			emu88Lib::HardwareDevice::DisplaySnapshot{});
 		const bool displayChanged = snapshot.revision != 0 && snapshot.revision != m_displayRevision;
 		const bool playlistChanged = playlistRevision != m_playlistRevision;
 		const bool playerChanged = playerStatus.revision != m_playerStatusRevision;

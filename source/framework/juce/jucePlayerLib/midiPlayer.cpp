@@ -128,6 +128,146 @@ namespace jucePlayer
         std::atomic_store_explicit(&m_playlist, std::shared_ptr<const Playlist>(playlist), std::memory_order_release);
     }
 
+    std::unique_ptr<juce::XmlElement> MidiPlayer::persistentState() const
+    {
+        auto state = std::make_unique<juce::XmlElement>("Player");
+        state->setAttribute("reset", static_cast<int>(resetMode()));
+        state->setAttribute("gap", static_cast<int>(songGapMs()));
+        state->setAttribute("tail", static_cast<int>(m_endTailMs.load()));
+        const auto playlist = std::atomic_load_explicit(&m_playlist, std::memory_order_acquire);
+        if(!playlist) return state;
+        // A playlist publication can precede the next audio callback's index remap.
+        // Resolve the immutable selected song against this exact published playlist.
+        auto selected = -1;
+        if(m_audioSong)
+        {
+            const auto found = std::find(playlist->songs.begin(), playlist->songs.end(), m_audioSong);
+            if(found != playlist->songs.end()) selected = static_cast<int>(std::distance(playlist->songs.begin(), found));
+        }
+        const auto pending = m_command.load(std::memory_order_acquire);
+        // post() packs Command in the low byte and selected index in the next24bits.
+        // Capture runs under the processor's audio lock, so m_lastCommand is coherent.
+        constexpr uint64_t commandMask = 0xffu;
+        constexpr unsigned commandBits = 8;
+        if(pending != m_lastCommand && static_cast<Command>(pending & commandMask) == Command::Play)
+            selected = static_cast<int>((pending >> commandBits) & commandIndexMask);
+        if(selected < 0 || static_cast<size_t>(selected) >= playlist->songs.size()) selected = -1;
+        state->setAttribute("selected", selected);
+        for(const auto& song : playlist->songs)
+        {
+            auto* entry = state->createNewChildElement("Song");
+            entry->setAttribute("path", song->info.path);
+            entry->setAttribute("name", song->info.name);
+            entry->setAttribute("error", song->info.error);
+            entry->setAttribute("duration", song->info.durationSeconds);
+            entry->setAttribute("openingMs", static_cast<int>(song->openingMs));
+            const auto write = [entry](const char* tag, const auto& events)
+            {
+                auto* group = entry->createNewChildElement(tag);
+                for(const auto& event : events)
+                {
+                    auto* item = group->createNewChildElement("Event");
+                    item->setAttribute("seconds", event.seconds);
+                    item->setAttribute("port", static_cast<int>(event.port));
+                    item->addTextElement(juce::MemoryBlock(event.bytes.data(), event.bytes.size()).toBase64Encoding());
+                }
+            };
+            write("Events", song->events);
+            write("Opening", song->opening);
+        }
+        return state;
+    }
+
+    bool MidiPlayer::loadPersistentState(const juce::XmlElement& state)
+    {
+        const auto reset = state.getIntAttribute("reset", -1);
+        const auto gap = state.getIntAttribute("gap", -1);
+        const auto tail = state.getIntAttribute("tail", -1);
+        // The tail limit is the existing public setEndTailMs contract.
+        constexpr int maximumTailMs = 600000;
+        if(!state.hasTagName("Player") || !synthLib::midi::isResetModeValue(reset) ||
+           gap < 0 || static_cast<uint32_t>(gap) > kMaximumSongGapMs || tail < 0 || tail > maximumTailMs) return false;
+        auto playlist = std::make_shared<Playlist>();
+        for(const auto* entry : state.getChildIterator())
+        {
+            if(!entry->hasTagName("Song")) return false;
+            auto song = std::make_shared<Song>();
+            song->info.path = entry->getStringAttribute("path").toStdString();
+            song->info.name = entry->getStringAttribute("name").toStdString();
+            song->info.error = entry->getStringAttribute("error").toStdString();
+            song->info.durationSeconds = entry->getDoubleAttribute("duration", -1);
+            const auto openingMs = entry->getIntAttribute("openingMs", -1);
+            if(!std::isfinite(song->info.durationSeconds) || song->info.durationSeconds < 0 || openingMs < 0) return false;
+            song->openingMs = static_cast<uint32_t>(openingMs);
+            const auto read = [entry](const char* tag, auto& events)
+            {
+                const auto* group = entry->getChildByName(tag);
+                if(!group) return false;
+                double previous{};
+                for(const auto* item : group->getChildIterator())
+                {
+                    const auto time = item->getDoubleAttribute("seconds", -1);
+                    const auto port = item->getIntAttribute("port", -1);
+                    juce::MemoryBlock bytes;
+                    if(!item->hasTagName("Event") || !std::isfinite(time) || time < previous || port < 0 ||
+                       port > std::numeric_limits<uint8_t>::max() || !bytes.fromBase64Encoding(item->getAllSubText()) || !bytes.getSize()) return false;
+                    synthLib::midi::Event event;
+                    event.seconds = time;
+                    event.port = static_cast<uint8_t>(port);
+                    const auto* begin = static_cast<const uint8_t*>(bytes.getData());
+                    event.bytes.assign(begin, begin + bytes.getSize());
+                    events.push_back(std::move(event));
+                    previous = time;
+                }
+                return true;
+            };
+            if(!read("Events", song->events) || !read("Opening", song->opening)) return false;
+            playlist->songs.push_back(std::move(song));
+        }
+        const auto selected = state.getIntAttribute("selected", -1);
+        if(selected < -1 || (selected >= 0 && static_cast<size_t>(selected) >= playlist->songs.size())) return false;
+        publish(std::move(playlist));
+        m_audioPlaylist = std::atomic_load_explicit(&m_playlist, std::memory_order_acquire);
+        m_audioSong = selected >= 0 ? m_audioPlaylist->songs[static_cast<size_t>(selected)] : nullptr;
+        m_audioIndex = selected;
+        m_audioState = State::Stopped;
+        m_command.store(0);
+        m_lastCommand = 0;
+        m_cursorSamples = 0;
+        m_eventIndex = 0;
+        m_waitSamples = 0;
+        m_startPhase = StartPhase::Ready;
+        updatePublishedStatus();
+        setResetMode(static_cast<ResetMode>(reset));
+        setSongGapMs(static_cast<uint32_t>(gap));
+        setEndTailMs(static_cast<uint32_t>(tail));
+        return true;
+    }
+
+    void MidiPlayer::installPersistentState(const MidiPlayer& candidate)
+    {
+        // Songs are immutable; independent playlists/transport state cannot alias edits.
+        // Candidate publication already allocated its immutable playlist. Installation is
+        // allocation-free so a host restore cannot fail after swapping the running board.
+        const auto next = std::atomic_load_explicit(&candidate.m_playlist, std::memory_order_acquire);
+        std::atomic_store_explicit(&m_playlist, next, std::memory_order_release);
+        setResetMode(candidate.resetMode());
+        setSongGapMs(candidate.songGapMs());
+        setEndTailMs(candidate.m_endTailMs.load());
+        m_command.store(0);
+        m_lastCommand = 0;
+        m_audioPlaylist = next;
+        const auto selected = candidate.status().currentIndex;
+        m_audioSong = selected >= 0 ? next->songs[static_cast<size_t>(selected)] : nullptr;
+        m_audioState = State::Stopped;
+        m_audioIndex = selected;
+        m_cursorSamples = 0;
+        m_eventIndex = 0;
+        m_waitSamples = 0;
+        m_startPhase = StartPhase::Ready;
+        updatePublishedStatus();
+    }
+
     MidiPlayer::AddResult MidiPlayer::addFiles(const std::vector<std::string>& _paths, const Unreadable _unreadable)
     {
         auto next = std::make_shared<Playlist>();

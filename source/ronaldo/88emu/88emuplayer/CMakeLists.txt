@@ -76,6 +76,7 @@ juce_add_plugin(88emuplayer
 )
 target_sources(88emuplayer PRIVATE
 	Emu88Processor.cpp Emu88Processor.h
+	Emu88State.cpp
 	app/Emu88LaunchOptions.cpp app/Emu88LaunchOptions.h
 	app/Emu88Playlist.cpp app/Emu88Playlist.h
 	ui/Emu88Editor.cpp ui/Emu88Editor.h
@@ -125,6 +126,7 @@ tus_exportTarget(88emuplayer)
 tus_registerChangelog(88emuplayer)
 
 if(TARGET 88emuplayer_VST3)
+	include(Emu88Vst3StateBoundary.cmake)
 	# Match createJucePlugin's bundle installation and format aggregate target.
 	if(APPLE)
 		install(TARGETS 88emuplayer_VST3 DESTINATION . COMPONENT ${playerProductName}-VST3)
@@ -189,6 +191,14 @@ else()
 endif()
 endif() # Standalone application and CLI
 if(BUILD_TESTING)
+	add_executable(88emuRecall_test tests/Emu88Recall_test.cpp)
+	target_link_libraries(88emuRecall_test PRIVATE 88emuplayer 88emuplayer_BinaryData 88lib
+		jucePlayerLib juceRmlUi juceUiLib jucePluginData juce_plugin_modules)
+	add_test(NAME 88emuRecall COMMAND 88emuRecall_test)
+	set_tests_properties(88emuRecall PROPERTIES
+		ENVIRONMENT "TUS_DATA_FOLDER=${CMAKE_CURRENT_BINARY_DIR}/recall-test-data"
+		SKIP_RETURN_CODE 77)
+	set_property(TARGET 88emuRecall_test PROPERTY FOLDER "Ronaldo/tests")
 	add_executable(88emuTransport_test tests/Emu88Transport_test.cpp)
 	target_link_libraries(88emuTransport_test PRIVATE 88emuplayer 88emuplayer_BinaryData 88lib
 		jucePlayerLib juceRmlUi juceUiLib jucePluginData juce_plugin_modules)

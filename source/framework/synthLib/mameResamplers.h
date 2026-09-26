@@ -18,6 +18,7 @@ namespace synthLib
     {
     public:
         virtual ~MameResampler() = default;
+        virtual std::unique_ptr<MameResampler> clone() const = 0;
 
         virtual uint32_t historySize() const = 0;
         virtual int64_t minSourceIndexForOutput(uint64_t destSample) const = 0;
@@ -31,6 +32,7 @@ namespace synthLib
     {
     public:
         MameResamplerHq(uint32_t fs, uint32_t ft, float latency = 0.005f, uint32_t maxOrderPerLane = 400, uint32_t maxLanes = 256);
+        std::unique_ptr<MameResampler> clone() const override { return std::make_unique<MameResamplerHq>(*this); }
 
         uint32_t historySize() const override;
         int64_t minSourceIndexForOutput(uint64_t destSample) const override;
@@ -58,6 +60,7 @@ namespace synthLib
     {
     public:
         MameResamplerLofi(uint32_t fs, uint32_t ft);
+        std::unique_ptr<MameResampler> clone() const override { return std::make_unique<MameResamplerLofi>(*this); }
 
         uint32_t historySize() const override;
         int64_t minSourceIndexForOutput(uint64_t destSample) const override;

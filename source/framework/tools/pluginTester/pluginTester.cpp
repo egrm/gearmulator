@@ -2,6 +2,7 @@
 
 #include "fakeAudioDevice.h"
 #include "pluginHost.h"
+#include "hostRecallTest.h"
 #include "logger.h"
 #include "baseLib/commandline.h"
 #include "baseLib/filesystem.h"
@@ -36,7 +37,7 @@ int main(const int _argc, char* _argv[])
 	{
 		Logger::writeToLog("Error: " + _msg);
 		Logger::writeToLog("Usage:\n"
-			"pluginTester -plugin <pathToPlugin> [-seconds n -blocks n -blocksize n -samplerate x -forever -repeat n]");
+			"pluginTester -plugin <pathToPlugin> [-recall | -seconds n -blocks n -blocksize n -samplerate x -forever -repeat n]");
 		return 1;
 	};
 
@@ -115,6 +116,11 @@ int main(const int _argc, char* _argv[])
 
 		if (desc.fileOrIdentifier.isEmpty())
 			return error("Failed to find plugin " + pluginPathName);
+
+		if (cmdLine.contains("recall-read"))
+			return hostRecallTest::readFreshProcess(desc, cmdLine.get("recall-read"));
+		if (cmdLine.contains("recall"))
+			return hostRecallTest::run(desc, cmdLine.get("recall-write"));
 
 	    if (!pluginHost.loadPlugin(desc))
 			return error("Failed to load plugin " + pluginPathName);

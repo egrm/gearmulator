@@ -185,6 +185,7 @@ namespace emu88Player
 			return;
 		}
 		player.play(_index);
+		m_processor.notifyStateChanged();
 	}
 
 	void Editor::showPlaylistNotice()
@@ -224,6 +225,7 @@ namespace emu88Player
 
 	void Editor::saveDefaultPlaylist()
 	{
+		m_processor.notifyStateChanged();
 		if(!standaloneLaunch)
 			return;
 		std::string error;

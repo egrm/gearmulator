@@ -61,8 +61,16 @@ namespace emu88Player
 		void setCurrentProgram(int) override {}
 		const juce::String getProgramName(int) override { return {}; }
 		void changeProgramName(int, const juce::String&) override {}
-		void getStateInformation(juce::MemoryBlock& _destination) override { _destination.reset(); }
-		void setStateInformation(const void*, int) override {}
+		void getStateInformation(juce::MemoryBlock& _destination) override;
+		void setStateInformation(const void*, int) override;
+		void setPanelButtons(uint32_t buttons);
+		void turnPanelEncoder(int32_t detents);
+		void clickPanelButton(uint32_t pressedButtons, uint32_t releasedButtons);
+		std::optional<emu88Lib::HardwareDevice::DisplaySnapshot> hardwareDisplaySnapshot() const;
+		void notifyStateChanged();
+		uint64_t restoredStateRevision() const { return m_restoredStateRevision.load(); }
+		std::string stateDiagnostic() const;
+		bool lastStateOperationSucceeded() const { return m_lastStateSucceeded.load(); }
 
 		emu88Lib::HardwareDevice* hardware() const { return m_device.get(); }
 		jucePlayer::MidiPlayer& midiPlayer() { return m_midiPlayer; }
@@ -73,21 +81,21 @@ namespace emu88Player
 		static constexpr float kMinimumOutputGain = 0.0f;
 		static constexpr float kUnityOutputGain = 1.0f;
 		static constexpr float kMaximumOutputGain = 2.0f;
-		void setReverseOutputChannels(bool reverse) { m_reverseOutputChannels.store(reverse); }
+		void setReverseOutputChannels(bool reverse) { const juce::ScopedLock lock(getCallbackLock()); m_reverseOutputChannels.store(reverse); notifyStateChanged(); }
 		float outputGain() const { return m_outputGain.load(std::memory_order_relaxed); }
 		void setOutputGain(float _gain);
 		bool outputLimiterEnabled() const { return m_limiterEnabled.load(); }
 		void setOutputLimiterEnabled(bool enabled);
 		synthLib::Resampler::Mode resamplerMode() const;
 		void setResamplerMode(synthLib::Resampler::Mode _mode);
-		emu88Lib::AnalogOutputMode analogOutputMode() const { return m_analogOutputMode; }
+		emu88Lib::AnalogOutputMode analogOutputMode() const { const juce::ScopedLock lock(getCallbackLock()); return m_analogOutputMode; }
 		void setAnalogOutputMode(emu88Lib::AnalogOutputMode _mode);
 		bool portMidiEnabled() const { return m_portMidiEnabled.load(std::memory_order_acquire); }
 		void setPortMidiEnabled(bool _enabled);
-		emu88Lib::DeviceModel deviceModel() const { return m_deviceModel; }
+		emu88Lib::DeviceModel deviceModel() const { const juce::ScopedLock lock(getCallbackLock()); return m_deviceModel; }
 		bool setDeviceModel(emu88Lib::DeviceModel _model);
 		bool restartDevice();
-		bool isPoweredOn() const { return m_device != nullptr; }
+		bool isPoweredOn() const { const juce::ScopedLock lock(getCallbackLock()); return m_device != nullptr; }
 		bool setPower(bool enabled, uint32_t heldButtons = 0);
 		void sendGmReset();
 		void sendGm2Reset();
@@ -109,7 +117,7 @@ namespace emu88Player
 		juce::PropertiesFile& config() const { return *m_config; }
 		const std::string& dataFolder() const { return m_dataFolder; }
 		const std::string& romFolder() const { return m_romFolder; }
-		bool hasValidRom() const { return m_device && m_device->isValid(); }
+		bool hasValidRom() const { const juce::ScopedLock lock(getCallbackLock()); return m_device && m_device->isValid(); }
 
 		// Offline startup work for the next device load, see emu88Lib::BootOptions. The running
 		// board keeps the state it booted with.
@@ -135,6 +143,21 @@ namespace emu88Player
 		}
 
 	private:
+		std::mutex m_stateTransaction;
+		juce::MemoryBlock m_loadedState;
+		std::unique_ptr<juce::XmlElement> m_stateEnvelope;
+		std::string m_stateDiagnostic;
+		bool m_unavailableState = false;
+		bool m_loadedStateUnchanged = false;
+		uint64_t m_loadedPlaylistRevision = 0;
+		uint64_t m_loadedPlayerStatusRevision = 0;
+		uint64_t m_loadedPlayerCommandRevision = 0;
+		uint64_t m_lifecycleGeneration = 0;
+		double m_preparedSampleRate = 0;
+		int m_preparedBlockSize = 0;
+		std::atomic<bool> m_lastStateSucceeded{true};
+		std::atomic<bool> m_dirtyNotification{false};
+		std::atomic<uint64_t> m_restoredStateRevision{0};
 		synthLib::DeviceCreateParams createDeviceParams(emu88Lib::DeviceModel _model) const;
 		bool replaceDevice(emu88Lib::DeviceModel _model, bool _persistModel, uint32_t heldButtons = 0);
 		uint8_t midiPortCount() const;
@@ -170,6 +193,7 @@ namespace emu88Player
 		// by processBlock(), so live input keeps its timing within the block.
 		std::array<juce::MidiMessageCollector, 4> m_liveMidi;
 		juce::MidiBuffer m_liveMidiBlock;
+		bool m_liveMidiPending = false;
 
 		// Touched by the audio callback, so every change is made under
 		// getCallbackLock(). m_recording only mirrors m_recorder for the editor.

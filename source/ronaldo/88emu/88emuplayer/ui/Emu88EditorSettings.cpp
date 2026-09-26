@@ -30,8 +30,13 @@ namespace emu88Player
         m_settingGuiScale = true;
         setSize(g_defaultWidth * _percent / 100, g_defaultHeight * _percent / 100);
         m_settingGuiScale = false;
+        if (m_syncingEditor)
+            return;
+        const juce::ScopedLock lock(m_processor.getCallbackLock());
+        const bool changed = m_processor.config().getIntValue("scale") != _percent;
         m_processor.config().setValue("scale", _percent);
         m_processor.config().saveIfNeeded();
+        if (changed) m_processor.notifyStateChanged();
     }
 
     void Editor::adoptStandaloneSettings()
@@ -281,9 +286,11 @@ namespace emu88Player
                     if (index < 0 || index >= static_cast<int>(modes.size()))
                         return;
                     const auto mode = modes[static_cast<size_t>(index)];
+                    const juce::ScopedLock lock(m_processor.getCallbackLock());
                     m_processor.midiPlayer().setResetMode(mode);
                     m_processor.config().setValue("songResetMode", static_cast<int>(mode));
                     m_processor.config().saveIfNeeded();
+                    m_processor.notifyStateChanged();
                 });
         }
         if (auto* gap = dynamic_cast<Rml::ElementFormControlInput*>(m_settingsRoot->GetElementById("songGapMs")))
@@ -298,9 +305,11 @@ namespace emu88Player
                     const auto parsed = std::from_chars(value.data(), value.data() + value.size(), milliseconds);
                     if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size())
                         return;
+                    const juce::ScopedLock lock(m_processor.getCallbackLock());
                     m_processor.midiPlayer().setSongGapMs(milliseconds);
                     m_processor.config().setValue("songGapMs", static_cast<int>(m_processor.midiPlayer().songGapMs()));
                     m_processor.config().saveIfNeeded();
+                    m_processor.notifyStateChanged();
                 });
             juceRmlUi::EventListener::Add(gap, Rml::EventId::Blur, [this, gap](Rml::Event&)
                                           { gap->SetValue(std::to_string(m_processor.midiPlayer().songGapMs())); });
@@ -312,8 +321,10 @@ namespace emu88Player
         wireToggle("btWarnRomHashMismatch", m_processor.config().getBoolValue("warnRomHashMismatch", true),
                    [this](const bool _enabled)
                    {
+                       const juce::ScopedLock lock(m_processor.getCallbackLock());
                        m_processor.config().setValue("warnRomHashMismatch", _enabled);
                        m_processor.config().saveIfNeeded();
+                       m_processor.notifyStateChanged();
                    });
 
         // Both are taken up by the next device load, Power on or Restart.
@@ -362,14 +373,20 @@ namespace emu88Player
         wireToggle("btReloadViaF5", m_processor.config().getBoolValue("reloadSkinViaF5", false),
                    [this](const bool _enabled)
                    {
+                       const juce::ScopedLock lock(m_processor.getCallbackLock());
                        m_processor.config().setValue("reloadSkinViaF5", _enabled);
                        m_processor.config().saveIfNeeded();
+                       m_processor.notifyStateChanged();
                    });
         wireToggle("btEnableRmlUiDebugger", m_processor.config().getBoolValue("enableRmlUiDebugger", false),
                    [this](const bool _enabled)
                    {
-                       m_processor.config().setValue("enableRmlUiDebugger", _enabled);
-                       m_processor.config().saveIfNeeded();
+                       {
+                           const juce::ScopedLock lock(m_processor.getCallbackLock());
+                           m_processor.config().setValue("enableRmlUiDebugger", _enabled);
+                           m_processor.config().saveIfNeeded();
+                           m_processor.notifyStateChanged();
+                       }
                        if (m_rml)
                        {
                            juceRmlUi::RmlInterfaces::ScopedAccess access(*m_rml);
@@ -379,8 +396,12 @@ namespace emu88Player
         wireToggle("btForceSoftwareRendering", m_processor.config().getIntValue("forceSoftwareRenderer", -1) > 0,
                    [this](const bool _enabled)
                    {
-                       m_processor.config().setValue("forceSoftwareRenderer", _enabled ? 1 : 0);
-                       m_processor.config().saveIfNeeded();
+                       {
+                           const juce::ScopedLock lock(m_processor.getCallbackLock());
+                           m_processor.config().setValue("forceSoftwareRenderer", _enabled ? 1 : 0);
+                           m_processor.config().saveIfNeeded();
+                           m_processor.notifyStateChanged();
+                       }
                        // The renderer is chosen when a window's RmlUi component is created, so both
                        // windows are rebuilt: the panel here, and this settings window right after -
                        // it keeps drawing with the old renderer otherwise, until it is reopened.

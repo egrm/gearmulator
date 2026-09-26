@@ -1,0 +1,263 @@
+// Headless real processor callbacks; never opens an audio/MIDI device or editor.
+#include "88emuplayer/Emu88Processor.h"
+#include "88emuplayer/app/Emu88LaunchOptions.h"
+#include "88lib/settingsChunk.h"
+#include "88lib/boards/sc88pro.h"
+#include "88lib/rom/romloader.h"
+#include "common/test_util.hpp"
+#include "baseLib/os.h"
+#include <iostream>
+
+namespace
+{
+    juce::MemoryBlock save(emu88Player::Processor& processor)
+    {
+        juce::MemoryBlock result;
+        processor.getStateInformation(result);
+        CHECK(processor.lastStateOperationSucceeded());
+        CHECK(result.getSize() > 0);
+        if(!result.getSize()) throw std::runtime_error("Save callback returned empty state");
+        return result;
+    }
+
+    emu88Lib::SettingsChunk hardware(const juce::MemoryBlock& state)
+    {
+        auto root = juce::parseXML(juce::String::fromUTF8(static_cast<const char*>(state.getData()), static_cast<int>(state.getSize())));
+        juce::MemoryBlock bytes;
+        CHECK(root != nullptr);
+        if(!root) throw std::runtime_error("Saved envelope is not readable");
+        CHECK(bytes.fromBase64Encoding(root->getChildByName("Payload")->getChildByName("Hardware")->getAllSubText()));
+        auto result = emu88Lib::SettingsChunk::decode(bytes.getData(), bytes.getSize());
+        CHECK(result.has_value());
+        return *result;
+    }
+
+    void load(emu88Player::Processor& processor, const juce::MemoryBlock& state)
+    {
+        processor.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+        if(!processor.lastStateOperationSucceeded()) std::cerr << processor.stateDiagnostic() << '\n';
+        CHECK(processor.lastStateOperationSucceeded());
+    }
+
+    double render(emu88Player::Processor& processor, int frames, juce::MidiBuffer midi = {})
+    {
+        juce::AudioBuffer<float> buffer(2, frames);
+        processor.processBlock(buffer, midi);
+        double energy{};
+        for(int c = 0; c < buffer.getNumChannels(); ++c)
+            for(int i = 0; i < frames; ++i) energy += std::abs(buffer.getSample(c, i));
+        return energy;
+    }
+
+    void reject(emu88Player::Processor& processor, const void* bytes, int size)
+    {
+        bool rejected = false;
+        try { processor.setStateInformation(bytes, size); }
+        catch(const std::exception&) { rejected = true; }
+        CHECK(rejected);
+        CHECK(!processor.lastStateOperationSucceeded());
+    }
+
+    uint8_t selectedLevel(const emu88Lib::SettingsChunk& state)
+    {
+        // Audited sc88pro_state_probe.cpp panel-boundary fixture: A1 descriptor
+        // pointer CF7A, level field at offset8. CF7C belongs to the A2 journal fixture.
+        const auto address = (size_t{state.memory[0xcf7a]} << 8) | state.memory[0xcf7b];
+        return state.memory.at(address + 8);
+    }
+}
+
+int main()
+{
+    if(!std::getenv("TUS_DATA_FOLDER") || !std::getenv("TUS_TEST_ROM_DIR")) return 77;
+    baseLib::disableErrorDialogs();
+    juce::ScopedJuceInitialiser_GUI juceLifetime;
+    emu88Player::LaunchOptions launch;
+    launch.values["rom-dir"] = std::getenv("TUS_TEST_ROM_DIR");
+    emu88Player::standaloneLaunch = &launch;
+    juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
+    try
+    {
+        emu88Player::Processor first;
+        CHECK(first.hasValidRom());
+        CHECK(!first.portMidiEnabled());
+        first.setRateAndBufferSizeDetails(44100, 128);
+        first.prepareToPlay(44100, 128);
+        juce::MidiBuffer setup;
+        setup.addEvent(juce::MidiMessage::programChange(1, 17), 0);
+        setup.addEvent(juce::MidiMessage::controllerEvent(1, 7, 53), 31);
+        setup.addEvent(juce::MidiMessage::controllerEvent(1, 11, 71), 63);
+        setup.addEvent(juce::MidiMessage::pitchWheel(1, 10240), 80);
+        setup.addEvent(juce::MidiMessage::controllerEvent(1, 1, 39), 100);
+        render(first, 128, setup);
+        first.setOutputGain(0.375f);
+        first.setOutputLimiterEnabled(true);
+        first.setAnalogOutputMode(emu88Lib::AnalogOutputMode::Sc88Pro);
+        first.config().setValue("scale", 137);
+        first.config().setValue("audioSetup", "first-machine-routing");
+        first.notifyStateChanged();
+        const auto saved = save(first);
+        CHECK(!juce::String::fromUTF8(static_cast<const char*>(saved.getData()), static_cast<int>(saved.getSize())).contains("first-machine-routing"));
+        const auto savedHardware = hardware(saved);
+        first.setOutputGain(1.5f);
+        first.setAnalogOutputMode(emu88Lib::AnalogOutputMode::Off);
+        juce::MidiBuffer mutate;
+        mutate.addEvent(juce::MidiMessage::programChange(1, 3), 0);
+        mutate.addEvent(juce::MidiMessage::controllerEvent(1, 11, 12), 0);
+        render(first, 128, mutate);
+        CHECK(hardware(save(first)).memory != savedHardware.memory);
+        load(first, saved);
+        CHECK_EQ(first.outputGain(), 0.375f);
+        CHECK(first.outputLimiterEnabled());
+        CHECK(first.analogOutputMode() == emu88Lib::AnalogOutputMode::Sc88Pro);
+        CHECK_EQ(first.config().getIntValue("scale"), 137);
+        CHECK(save(first) == saved);
+        juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
+        emu88Player::Processor second;
+        second.config().setValue("audioSetup", "second-machine-routing");
+        auto* stableConfig = &second.config();
+        load(second, saved); // No Prepare, editor, process or message loop.
+        CHECK(&second.config() == stableConfig);
+        CHECK(stableConfig->getValue("audioSetup") == "second-machine-routing");
+        CHECK(save(second) == saved);
+        second.setRateAndBufferSizeDetails(48000, 64);
+        second.prepareToPlay(48000, 64);
+        second.releaseResources();
+        second.setRateAndBufferSizeDetails(44100, 128);
+        second.prepareToPlay(44100, 128);
+        CHECK_EQ(second.outputGain(), 0.375f);
+        CHECK(render(second, 1024) == 0.0); // Fresh silent timeline.
+        // Audited receive fields from Sc88ProSettings and ROM handlers3F19..455A.
+        // Reading a newly captured running board prevents the unchanged-blob cache from
+        // making a no-op Load appear to work.
+        const auto restoredHardware = hardware(save(second));
+        for(size_t part = 0; part < 32; ++part)
+            for(const auto base : {0xc660, 0xc661, 0xc6a0, 0xc6a1, 0xc6e0, 0xc6e1,
+                                  0xc720, 0xc721, 0xc760, 0xc761, 0xc820, 0xc860,
+                                  0xc861, 0xc8a0, 0xc8e0, 0xc8e1, 0xc920, 0xc921})
+                CHECK_EQ(restoredHardware.memory[base + part * 2], savedHardware.memory[base + part * 2]);
+        juce::MidiBuffer note;
+        note.addEvent(juce::MidiMessage::noteOn(1, 60, static_cast<juce::uint8>(100)), 0);
+        double energy = render(second, 128, note);
+        for(int block = 0; block < 64; ++block) energy += render(second, 128);
+        CHECK(energy > 0.0); // The very first new note must be accepted.
+        const auto sounding = save(second);
+        load(second, sounding);
+        CHECK(render(second, 2048) == 0.0); // Held notes are not restored.
+        second.setOutputGain(0.125f);
+        CHECK_EQ(first.outputGain(), 0.375f);
+        auto corrupt = saved;
+        static_cast<uint8_t*>(corrupt.getData())[corrupt.getSize() / 2] ^= 1;
+        const auto revision = first.restoredStateRevision();
+        reject(first, corrupt.getData(), static_cast<int>(corrupt.getSize()));
+        CHECK(!first.lastStateOperationSucceeded());
+        CHECK_EQ(first.restoredStateRevision(), revision);
+        CHECK_EQ(first.outputGain(), 0.375f);
+        CHECK(save(first) == saved);
+        // Every truncation must reject before replacing a valid instance.
+        for(size_t length = 0; length < saved.getSize(); length += 997)
+        {
+            reject(first, saved.getData(), static_cast<int>(length));
+            CHECK(!first.lastStateOperationSucceeded());
+            CHECK_EQ(first.restoredStateRevision(), revision);
+        }
+        juce::MidiBuffer zeroFrame;
+        zeroFrame.addEvent(juce::MidiMessage::programChange(1, 42), 0);
+        zeroFrame.addEvent(juce::MidiMessage::controllerEvent(1, 11, 31), 0);
+        render(first, 0, zeroFrame);
+        const auto zeroFrameSaved = save(first);
+        const auto zeroFrameHardware = hardware(zeroFrameSaved);
+        // Primary handler41B5/probe: expression is the low byte C6E1 of each part
+        // word; firmware slot0 is not necessarily MIDI channel1 (fixture uses slot1).
+        std::vector<size_t> editedExpression;
+        for(size_t part = 0; part < 32; ++part)
+        {
+            const auto address = 0xc6e1 + part * 2;
+            if(savedHardware.memory[address] == 71)
+            {
+                editedExpression.push_back(address);
+                CHECK_EQ(zeroFrameHardware.memory[address], 31);
+            }
+        }
+        CHECK(!editedExpression.empty());
+        load(second, zeroFrameSaved);
+        render(second, 128);
+        const auto zeroFrameRestored = hardware(save(second));
+        for(const auto address : editedExpression) CHECK_EQ(zeroFrameRestored.memory[address], 31);
+        load(first, saved);
+        load(second, saved);
+        const auto levelRight = uint32_t{1} << static_cast<unsigned>(emu88Lib::Sc88ProButton::LevelR);
+        first.clickPanelButton(levelRight, 0);
+        first.clickPanelButton(levelRight, 0);
+        const auto clicked = save(first); // Completed clicks, no audio callback since acceptance.
+        second.clickPanelButton(levelRight, 0);
+        second.clickPanelButton(levelRight, 0);
+        render(second, 16384); // Independent live completion uses normal Processor::processBlock.
+        const auto liveClicked = save(second);
+        CHECK_EQ(selectedLevel(hardware(clicked)), selectedLevel(savedHardware) + 2);
+        CHECK_EQ(selectedLevel(hardware(clicked)), selectedLevel(hardware(liveClicked)));
+        load(first, clicked);
+        render(first, 128);
+        CHECK_EQ(selectedLevel(hardware(save(first))), selectedLevel(hardware(clicked)));
+        load(first, saved);
+        const auto emptyRoms = juce::File(emu88Player::defaultDataFolder()).getChildFile("empty-roms");
+        CHECK(emptyRoms.createDirectory().wasOk());
+        synthLib::RomLoader::setSearchPath(emptyRoms.getFullPathName().toStdString());
+        (void)emu88Lib::RomLoader::rescan();
+        load(first, saved);
+        CHECK(!first.hasValidRom());
+        CHECK(!first.stateDiagnostic().empty());
+        CHECK(save(first) == saved);
+        CHECK(render(first, 128) == 0.0);
+        first.setOutputGain(0.625f);
+        const auto missingEdited = save(first);
+        CHECK(hardware(missingEdited).memory == savedHardware.memory);
+        load(second, missingEdited);
+        CHECK_EQ(second.outputGain(), 0.625f);
+        CHECK(!second.hasValidRom());
+        CHECK(save(second) == missingEdited);
+        synthLib::RomLoader::setSearchPath(std::getenv("TUS_TEST_ROM_DIR"));
+        (void)emu88Lib::RomLoader::rescan();
+        CHECK(first.restartDevice());
+        CHECK(first.hasValidRom());
+        CHECK_EQ(first.outputGain(), 0.625f);
+        CHECK(hardware(save(first)).memory == savedHardware.memory);
+        // Accepted selection survives even before the player's next audio callback, and
+        // unavailable playlist entries keep their positions without rereading their paths.
+        const auto absentA = juce::File(emu88Player::defaultDataFolder()).getChildFile("absent-a.mid").getFullPathName().toStdString();
+        const auto absentB = juce::File(emu88Player::defaultDataFolder()).getChildFile("absent-b.mid").getFullPathName().toStdString();
+        first.midiPlayer().replaceFiles({absentA, absentB});
+        first.midiPlayer().play(1);
+        const auto selected = save(first); // No explicit processor notify: revision guard.
+        load(second, selected);
+        CHECK_EQ(second.midiPlayer().entries().size(), size_t{2});
+        CHECK_EQ(second.midiPlayer().status().currentIndex, 1);
+        CHECK(second.midiPlayer().status().state == jucePlayer::MidiPlayer::State::Stopped);
+        CHECK(save(second) == selected);
+        CHECK(second.midiPlayer().move(1, 0));
+        const auto moved = save(second); // Selected B moved; no player callback remapped index.
+        load(first, moved);
+        CHECK_EQ(first.midiPlayer().status().currentIndex, 0);
+        CHECK(first.midiPlayer().entries().front().path == absentB);
+        CHECK(first.midiPlayer().move(0, 2));
+        CHECK(first.midiPlayer().remove(0)); // Remove A before selected B, still no Process.
+        const auto removedBefore = save(first);
+        load(second, removedBefore);
+        CHECK_EQ(second.midiPlayer().status().currentIndex, 0);
+        CHECK(second.midiPlayer().entries().front().path == absentB);
+        // Supply off is distinct from missing ROM and survives load/save without Prepare.
+        first.setPower(false);
+        const auto off = save(first);
+        load(second, off);
+        CHECK(!second.isPoweredOn());
+        CHECK(save(second) == off);
+        std::cout << "Real callback program/controller/gain/analog, mutation, lifecycle, first-note, silence, isolation and corruption fixtures executed\n";
+    }
+    catch(const std::exception& error)
+    {
+        std::cerr << "Recall exception: " << error.what() << '\n';
+        CHECK(false);
+    }
+    emu88Player::standaloneLaunch = nullptr;
+    return test::finish("88emuRecall");
+}

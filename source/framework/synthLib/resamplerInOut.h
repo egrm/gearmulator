@@ -26,6 +26,8 @@ namespace synthLib
 
 		uint32_t getOutputLatency() const { return m_outputLatency; }
 		uint32_t getInputLatency() const { return m_inputLatency; }
+		void copyExecutionFrom(const ResamplerInOut& source);
+		bool hasPendingMidi() const { return !m_midiIn.empty(); }
 
 	private:
 		void recreate();

@@ -81,11 +81,15 @@ namespace emu88Player
 
 	void Editor::writeSkinToConfig(const Skin& _skin) const
 	{
+		if(m_syncingEditor) return;
+		const juce::ScopedLock lock(m_processor.getCallbackLock());
+		const bool changed = !(readSkinFromConfig() == _skin);
 		auto& config = m_processor.config();
 		config.setValue("skinDisplayName", juce::String::fromUTF8(_skin.displayName.c_str()));
 		config.setValue("skinFile", juce::String::fromUTF8(_skin.filename.c_str()));
 		config.setValue("skinFolder", juce::String::fromUTF8(_skin.folder.c_str()));
 		config.saveIfNeeded();
+		if(changed) m_processor.notifyStateChanged();
 	}
 
 	std::string Editor::skinFolder() const

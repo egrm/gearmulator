@@ -44,6 +44,8 @@ namespace synthLib
 		float getSamplerateOut() const { return m_samplerateOut; }
 		Mode getMode() const { return m_mode; }
 		void clearHistory();
+		// Private capture continuation: all phase and buffers survive; no filter prewarm.
+		std::unique_ptr<Resampler> cloneExecution() const;
 
 	private:
 		uint32_t processResample(const TAudioOutputs& _output, uint32_t _numChannels, uint32_t _numSamples, const TProcessFunc& _processFunc);

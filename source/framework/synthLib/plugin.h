@@ -25,6 +25,12 @@ namespace synthLib
 		Plugin(Device* _device, CallbackDeviceInvalid _callbackDeviceInvalid);
 
 		void addMidiEvent(const SMidiEvent& _ev);
+		// Caller excludes process/rate changes. Only supported with MIDI clock disabled.
+		std::unique_ptr<Plugin> cloneForCapture(Device* clonedDevice) const;
+		bool hasPendingCaptureInput() const;
+		bool hasIncompleteCaptureSysex() const { return !m_pendingSysexInput.sysex.empty(); }
+		void processCapture(size_t samples);
+		size_t captureInputQuantum() const;
 
 		bool setPreferredDeviceSamplerate(float _samplerate);
 

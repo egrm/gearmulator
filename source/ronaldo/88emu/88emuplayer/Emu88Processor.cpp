@@ -213,8 +213,10 @@ namespace emu88Player
 
 	void Processor::setBootOptions(const emu88Lib::BootOptions& _boot)
 	{
+		const juce::ScopedLock lock(getCallbackLock());
 		m_config->setValue(g_factoryResetOnLoadKey, _boot.factoryReset);
 		m_config->setValue(g_fastBootKey, _boot.fastBoot);
+		notifyStateChanged();
 		m_config->saveIfNeeded();
 	}
 
@@ -246,8 +248,10 @@ namespace emu88Player
 				return false;
 			}
 		}
+		const juce::ScopedLock lock(getCallbackLock());
 		m_pcmCard = std::move(card);
 		m_config->setValue(g_pcmCardPathKey, path);
+		notifyStateChanged();
 		m_config->saveIfNeeded();
 		return true;
 	}
@@ -256,6 +260,12 @@ namespace emu88Player
 	{
 		if(!emu88Lib::isDeviceModelValue(static_cast<uint32_t>(_model)))
 			return false;
+		bool retryUnavailable;
+		{
+			const juce::ScopedLock lock(getCallbackLock());
+			retryUnavailable = _model == m_deviceModel && m_unavailableState;
+		}
+		if(retryUnavailable) return restartDevice();
 
 		if(_model == m_deviceModel && hasValidRom())
 		{
@@ -268,12 +278,37 @@ namespace emu88Player
 
 	bool Processor::restartDevice()
 	{
+		bool retryUnavailable;
+		{
+			const juce::ScopedLock lock(getCallbackLock());
+			retryUnavailable = m_unavailableState;
+		}
+		if(retryUnavailable)
+		{
+			// Retrying asset resolution is not a factory restart. Preserve opaque hardware
+			// and any software edits made while unavailable; never replace them with defaults.
+			try
+			{
+				juce::MemoryBlock retained;
+				getStateInformation(retained);
+				(void)emu88Lib::RomLoader::rescan();
+				setStateInformation(retained.getData(), static_cast<int>(retained.getSize()));
+				return hasValidRom();
+			}
+			catch(const std::exception&) { return false; }
+		}
 		return replaceDevice(m_deviceModel, false);
 	}
 
 	bool Processor::setPower(const bool enabled, const uint32_t heldButtons)
 	{
-		if(enabled == isPoweredOn()) return !enabled || hasValidRom();
+		bool unavailable;
+		{
+			const juce::ScopedLock lock(getCallbackLock());
+			unavailable = m_unavailableState;
+		}
+		if(enabled && unavailable) return restartDevice();
+		if(!unavailable && enabled == isPoweredOn()) return !enabled || hasValidRom();
 		if(enabled) return replaceDevice(m_deviceModel, false, heldButtons);
 
 		std::unique_ptr<emu88Lib::HardwareDevice> previousDevice;
@@ -285,6 +320,8 @@ namespace emu88Player
 			m_midiPlayer.processBlock(discarded, 1, std::max(1.0, getSampleRate()), false);
 			previousEngine = std::move(m_engine);
 			previousDevice = std::move(m_device);
+			m_unavailableState = false;
+			notifyStateChanged();
 		}
 		previousEngine.reset();
 		previousDevice.reset();
@@ -325,6 +362,8 @@ namespace emu88Player
 			m_device = std::move(replacementDevice);
 			m_engine = std::move(replacementEngine);
 			m_deviceModel = _model;
+			m_unavailableState = false;
+			notifyStateChanged();
 			m_midiPlayer.setPortCount(midiPortCount());
 			m_midiPlayer.setResetTarget(emu88Lib::resetTarget(_model));
 		}
@@ -351,6 +390,7 @@ namespace emu88Player
 			return;
 		for(const auto& event : _events)
 			m_engine->addMidiEvent(event);
+		notifyStateChanged();
 	}
 
 	uint8_t Processor::midiPortCount() const
@@ -417,6 +457,10 @@ namespace emu88Player
 
 	void Processor::prepareToPlay(const double _sampleRate, const int _maximumBlockSize)
 	{
+		const juce::ScopedLock lock(getCallbackLock());
+		++m_lifecycleGeneration;
+		m_preparedSampleRate = _sampleRate;
+		m_preparedBlockSize = _maximumBlockSize;
 		m_outputLimiter.prepare(_sampleRate);
 		for(auto& collector : m_liveMidi)
 			collector.reset(_sampleRate);
@@ -429,18 +473,23 @@ namespace emu88Player
 
 	void Processor::setOutputLimiterEnabled(bool enabled)
 	{
+		const juce::ScopedLock lock(getCallbackLock());
 		m_limiterEnabled.store(enabled);
 		m_config->setValue("outputLimiter", enabled);
+		notifyStateChanged();
 		m_config->saveIfNeeded();
 	}
 
 	void Processor::setOutputGain(const float _gain)
 	{
+		const juce::ScopedLock lock(getCallbackLock());
+		if(!std::isfinite(_gain)) return;
 		const auto gain = std::clamp(_gain, kMinimumOutputGain, kMaximumOutputGain);
 		m_outputGain.store(gain, std::memory_order_relaxed);
 		// The knob emits a change per pixel of a drag. PropertiesFile coalesces
 		// these on its own save timer, so this must not saveIfNeeded() itself.
 		m_config->setValue(g_outputGainKey, gain);
+		notifyStateChanged();
 	}
 
 	synthLib::Resampler::Mode Processor::resamplerMode() const
@@ -450,26 +499,29 @@ namespace emu88Player
 
 	void Processor::setResamplerMode(const synthLib::Resampler::Mode _mode)
 	{
+		const juce::ScopedLock lock(getCallbackLock());
 		if(_mode < synthLib::Resampler::Mode::Legacy || _mode >= synthLib::Resampler::Mode::Count)
 			return;
 		m_resamplerMode.store(static_cast<int>(_mode), std::memory_order_relaxed);
 		if(m_engine)
 			m_engine->setResamplerMode(_mode);
 		m_config->setValue("resamplerMode", static_cast<int>(_mode));
+		notifyStateChanged();
 		m_config->saveIfNeeded();
 	}
 
 	void Processor::setAnalogOutputMode(const emu88Lib::AnalogOutputMode _mode)
 	{
+		const juce::ScopedLock lock(getCallbackLock());
 		if(!emu88Lib::isAnalogOutputModeValue(static_cast<uint32_t>(_mode)))
 			return;
 		m_analogOutputMode = _mode;
 		m_config->setValue("analogOutputMode", static_cast<int>(_mode));
+		notifyStateChanged();
 		m_config->saveIfNeeded();
 
 		// A model that oversamples changes the device rate. The board and the engine's
 		// resampler switch together, between two audio callbacks.
-		const juce::ScopedLock lock(getCallbackLock());
 		if(!m_device || !m_engine)
 			return;
 		m_device->setAnalogOutputMode(_mode);
@@ -507,11 +559,19 @@ namespace emu88Player
 
 	void Processor::handleAsyncUpdate()
 	{
-		if(m_engine) m_engine->applyPendingDeviceSamplerate();
+		{
+			const juce::ScopedLock lock(getCallbackLock());
+			if(m_engine) m_engine->applyPendingDeviceSamplerate();
+		}
+		if(m_dirtyNotification.exchange(false))
+			updateHostDisplay(ChangeDetails{}.withNonParameterStateChanged(true));
 	}
 
 	void Processor::addLiveMidi(const juce::MidiMessage& _message, const uint8_t _groups)
 	{
+		const juce::ScopedLock lock(getCallbackLock());
+		m_loadedStateUnchanged = false;
+		m_liveMidiPending = true;
 		for(uint8_t group = 0; group < m_liveMidi.size(); ++group)
 			if(_groups & (1u << group))
 				m_liveMidi[group].addMessageToQueue(_message);
@@ -537,10 +597,13 @@ namespace emu88Player
 				addMidiBuffer(m_liveMidiBlock, group, synthLib::MidiEventSource::Physical);
 		}
 		m_liveMidiBlock.clear();
+		m_liveMidiPending = false;
 	}
 
 	void Processor::processBlock(juce::AudioBuffer<float>& _buffer, juce::MidiBuffer& _midi)
 	{
+		const juce::ScopedLock lock(getCallbackLock());
+		if(_buffer.getNumSamples() > int{} || !_midi.isEmpty()) m_loadedStateUnchanged = false;
 		juce::ScopedNoDenormals noDenormals;
 		_buffer.clear();
 		if(!m_engine || !m_device || !m_device->isValid())
@@ -559,6 +622,9 @@ namespace emu88Player
 		// through jucePlayer::MidiInputRouting, per part group.
 		addMidiBuffer(_midi, 0, synthLib::MidiEventSource::Host);
 		_midi.clear();
+		// Zero-frame calls may carry accepted MIDI. Keep it queued without asking the
+		// resampler to clamp against an empty native chunk or touching audio pointers.
+		if(_buffer.getNumSamples() == int{}) return;
 		takeLiveMidi(_buffer.getNumSamples(), true);
 
 		std::vector<synthLib::SMidiEvent> playerEvents;

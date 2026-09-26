@@ -2,6 +2,7 @@
 
 #include "88lib/analog/analogOutput.h"
 #include "88lib/deviceModel.h"
+#include "88lib/settingsChunk.h"
 
 #include "synthLib/device.h"
 #include "synthLib/midiBufferParser.h"
@@ -101,6 +102,13 @@ namespace emu88Lib
 		uint64_t getDspClockHz() const override;
 		DeviceModel model() const { return m_model; }
 		void setPanelButtons(uint32_t _buttons);
+		void clickPanelButton(uint32_t pressedButtons, uint32_t releasedButtons);
+		// Exclusive owner snapshots the board and accepted input; drain outside live locks.
+		std::unique_ptr<HardwareDevice> cloneForCapture() const;
+		bool isSettingsBoundary() const;
+		SettingsChunk captureSettings() const;
+		void advanceCaptureFrame();
+		const std::vector<SettingsChunk::Digest>& assetDigests() const { return m_assetDigests; }
 		// The SC-8850's VALUE encoder, or the MT-32's VOLUME/VALUE knob, which a detent turns
 		// by a 32nd of its travel.
 		void turnPanelEncoder(int32_t _detents);
@@ -125,11 +133,14 @@ namespace emu88Lib
 		              std::vector<synthLib::SMidiEvent>&) override;
 
 	private:
+		struct CaptureTag {};
+		HardwareDevice(const HardwareDevice& source, CaptureTag);
 		enum class PanelCommandType : uint8_t { Buttons, Encoder };
 		struct PanelCommand
 		{
 			PanelCommandType type = PanelCommandType::Buttons;
 			int32_t value = 0;
+			uint64_t minimumHoldSamples = 0;
 		};
 
 		float dacSamplerate() const;
@@ -148,6 +159,7 @@ namespace emu88Lib
 		void trackMidiActivity(const synthLib::SMidiEvent& event);
 
 		DeviceModel m_model = DeviceModel::Sc88Pro;
+		std::vector<SettingsChunk::Digest> m_assetDigests;
 		std::unique_ptr<Sc88> m_sc88;
 		std::unique_ptr<Sc88Pro> m_sc88Pro;
 		std::unique_ptr<Sc8850> m_sc8850;

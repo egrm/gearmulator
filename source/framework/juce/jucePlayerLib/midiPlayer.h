@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+namespace juce { class XmlElement; }
+
 namespace jucePlayer
 {
     class MidiPlayer final
@@ -112,7 +114,14 @@ namespace jucePlayer
         // Startup silence for a song, including cleanup, reset and opening setup.
         double preparationSeconds(size_t _index) const;
         uint64_t playlistRevision() const;
+        uint64_t commandRevision() const { return m_command.load(std::memory_order_acquire); }
         Status status() const;
+
+        // Immutable song data, not filesystem references or playback/voice history.
+        std::unique_ptr<juce::XmlElement> persistentState() const;
+        bool loadPersistentState(const juce::XmlElement& state);
+        // Exclusive audio owner only; candidate was completely validated off-thread.
+        void installPersistentState(const MidiPlayer& candidate);
 
         // Called only by the audio thread. Appends sample-offset MIDI events and
         // never reads the filesystem or takes a mutex. Once a song's last event

@@ -181,6 +181,9 @@ namespace emu88Player
 		uint64_t m_playerStatusRevision = ~uint64_t{0};
 		juce::ComponentBoundsConstrainer m_sizeConstrainer;
 		bool m_settingGuiScale = false;
+		// Creating or refreshing the view must not write defaults back into host state.
+		bool m_syncingEditor = true;
+		uint64_t m_restoredStateRevision{};
 
 		JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Editor)
 		JUCE_DECLARE_WEAK_REFERENCEABLE(Editor)

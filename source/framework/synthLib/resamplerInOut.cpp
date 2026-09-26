@@ -12,6 +12,31 @@ using namespace dsp56k;
 
 namespace synthLib
 {
+	void ResamplerInOut::copyExecutionFrom(const ResamplerInOut& source)
+	{
+		assert(m_channelCountIn == source.m_channelCountIn && m_channelCountOut == source.m_channelCountOut);
+		m_dynamicSamplerates = source.m_dynamicSamplerates;
+		m_samplerateHost = source.m_samplerateHost;
+		m_mode = source.m_mode;
+		m_out = source.m_out ? source.m_out->cloneExecution() : nullptr;
+		m_in = source.m_in ? source.m_in->cloneExecution() : nullptr;
+		m_samplerateDevice = source.m_samplerateDevice;
+		m_scaledInput = source.m_scaledInput;
+		m_input = source.m_input;
+		m_scaledInputSize = source.m_scaledInputSize;
+		m_processedMidiIn = source.m_processedMidiIn;
+		m_midiIn = source.m_midiIn;
+		m_midiOut = source.m_midiOut;
+		m_inputLatency = source.m_inputLatency;
+		m_outputLatency = source.m_outputLatency;
+		m_alternatives.clear();
+		for(const auto& alternative : source.m_alternatives)
+		{
+			auto copy = std::make_unique<ResamplerInOut>(m_channelCountIn, m_channelCountOut);
+			copy->copyExecutionFrom(*alternative);
+			m_alternatives.push_back(std::move(copy));
+		}
+	}
 	ResamplerInOut::ResamplerInOut(uint32_t _channelCountIn, uint32_t _channelCountOut)
 	: m_channelCountIn(_channelCountIn)
 	, m_channelCountOut(_channelCountOut)
