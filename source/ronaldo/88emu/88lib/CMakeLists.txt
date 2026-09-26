@@ -16,6 +16,7 @@ set(SOURCES
 	boards/miig5.cpp boards/miig5.h
 	boards/nu10b.cpp boards/nu10b.h
 	hardwareDevice.cpp hardwareDevice.h
+	settingsChunk.cpp settingsChunk.h
 	rom/rom.cpp rom/rom.h
 	rom/romloader.cpp rom/romloader.h
 	rom/romInventory.cpp rom/romScanner.cpp
@@ -106,6 +107,10 @@ if(NOT MSVC)
 endif()
 
 if(BUILD_TESTING)
+	add_executable(settingsChunk_test tests/settingsChunk_test.cpp)
+	target_link_libraries(settingsChunk_test PRIVATE 88lib)
+	add_test(NAME settingsChunk COMMAND settingsChunk_test)
+	set_property(TARGET settingsChunk_test PROPERTY FOLDER "Ronaldo/tests")
 	add_executable(sc88proSettings_test tests/sc88proSettings_test.cpp)
 	target_link_libraries(sc88proSettings_test PRIVATE 88lib)
 	add_test(NAME sc88proSettings COMMAND sc88proSettings_test)
