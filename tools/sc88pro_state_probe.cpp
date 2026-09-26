@@ -13,8 +13,22 @@
 #include <filesystem>
 #include <array>
 #include <algorithm>
+#include <deque>
 
 using namespace emu88Lib;
+
+namespace emu88Lib
+{
+    // Test-only access to instruction-boundary PC; no exploratory production API.
+    struct Sc88ProSettingsProbe
+    {
+        static uint32_t pc(const Sc88Pro& board)
+        {
+            const auto& regs = board.m_machine.cpu().regs();
+            return (uint32_t(regs.cp) << 16) | regs.pc;
+        }
+    };
+}
 
 static bool withoutPortamento = false;
 static bool effectControllerFixture = false;
@@ -22,6 +36,9 @@ static bool activeCaptureFixture = false;
 static bool panelBoundaryFixture = false;
 static bool useProductionAdapter = false;
 static bool panelCloneFixture = false;
+static bool idleBoundaryFixture = false;
+static bool journalFixture = false;
+static bool journalOrderingFixture = false;
 
 // Test stimuli for receive-state fields identified in the installed ROM's MIDI handlers.
 static const std::array<std::array<uint8_t,3>, 16> extraControllerEvents = {{
@@ -418,6 +435,28 @@ static bool panelBoundary(Probe& board, uint32_t buttons, bool allowDeferred)
         && board.extRead8(0xc0f840) == 0x81 && !(board.extRead8(0xc0f841)&1);
 }
 
+static unsigned ramWord(Probe& board, unsigned address)
+{
+    return (unsigned(board.extRead8(0xc00000+address)) << 8) | board.extRead8(0xc00000+address+1);
+}
+
+static bool coherentBoundary(Probe& board, uint32_t buttons)
+{
+    const auto pc = Sc88ProSettingsProbe::pc(board);
+    return (pc == 0x65b || pc == 0x65f || pc == 0x662) && ramWord(board, 0xf82e) == 0
+        && board.midiInBacklog() == 0 && panelBoundary(board, buttons, true);
+}
+
+static void copyPanelContext(Probe& board, const std::vector<uint8_t>& captured)
+{
+    // Exclude all three known17-byte timer records: their links/deadlines belong
+    // to the independently booted board's scheduler, not this UI data image.
+    for(const auto range : {std::pair<unsigned,unsigned>{0x4666,0x46e4},
+                            {0x46f5,0x4b2a}, {0x4b3b,0x4d64}, {0x4d75,0x5000}})
+        for(unsigned address = range.first; address < range.second; ++address)
+            board.extWrite8(0xc00000+address, captured[address]);
+}
+
 static void applyPanelAndWait(Probe& board, uint32_t buttons, bool allowDeferred, const char* label)
 {
     board.setButtons(buttons);
@@ -436,8 +475,8 @@ static void applyPanelAndWait(Probe& board, uint32_t buttons, bool allowDeferred
 
 static int testPanelClone(const std::vector<uint8_t>& rom, const std::vector<uint8_t>& waves)
 {
-    // Hypothesis only: clone native UI context in a private board, excluding the registered
-    // scan timer record46E4. These broad ranges are NOT an approved production layout.
+    // Hypothesis only: clone UI data but exclude all three timer nodes in this
+    // range, established by the25 direct01198F registration sites. Not production.
     bool allEqual = true;
     for(unsigned scenario = 0; scenario < 3; ++scenario)
     {
@@ -453,9 +492,7 @@ static int testPanelClone(const std::vector<uint8_t>& rom, const std::vector<uin
         auto shadow = std::make_unique<Probe>(rom, waves, false);
         if(Sc88ProSettings::restore(*shadow, captured) != Sc88ProSettings::Result::Success)
             throw std::runtime_error("panel clone restore failed");
-        for(const auto range : {std::pair<unsigned,unsigned>{0x4666,0x46e4}, {0x4700,0x5000}})
-            for(unsigned address = range.first; address < range.second; ++address)
-                shadow->extWrite8(0xc00000+address, captured[address]);
+        copyPanelContext(*shadow, captured);
         applyPanelAndWait(*shadow, 0, false, "shadow-release");
         // Only now advance the independent live reference. Private resolution changed none of it.
         applyPanelAndWait(*live, 0, false, "live-release");
@@ -467,6 +504,205 @@ static int testPanelClone(const std::vector<uint8_t>& rom, const std::vector<uin
         screen(*live, "live-after-click"); screen(*shadow, "shadow-after-click");
         std::cout << "panel-clone-scenario=" << scenario << '\n' << std::flush;
         allEqual &= compare(dump(*live), dump(*shadow), "private-panel-resolution");
+    }
+    return allEqual ? 0 : 1;
+}
+
+static int traceIdleBoundary(Probe& board)
+{
+    // Source candidate: dispatcher empty-ready-queue loop00:065B/065F/0662.
+    // Observe a bounded second per scenario, including a held key and wire-rate CCs.
+    bool quietGateSeen = false;
+    for(unsigned scenario = 0; scenario < 5; ++scenario)
+    {
+        const auto buttons = scenario == 1 ? uint32_t{1} << unsigned(Sc88ProButton::LevelR) : 0;
+        board.setButtons(buttons);
+        std::map<uint32_t,unsigned> pcs;
+        std::map<unsigned,unsigned> priorities;
+        unsigned idleSamples = 0, candidateSamples = 0, gap = 0, longestGap = 0;
+        for(unsigned sample = 0; sample < 32000; ++sample)
+        {
+            if(scenario == 3 && sample % 32 == 0)
+            {
+                synthLib::SMidiEvent event(synthLib::MidiEventSource::Host);
+                event.a = 0xb0; event.b = 11; event.c = uint8_t((sample/32)%128);
+                board.addMidiEvent(event, 0);
+            }
+            board.renderSample();
+            const auto pc = Sc88ProSettingsProbe::pc(board);
+            ++pcs[pc];
+            ++priorities[(unsigned(board.extRead8(0xc0f800)) << 8) | board.extRead8(0xc0f801)];
+            const bool idle = pc == 0x65b || pc == 0x65f || pc == 0x662;
+            idleSamples += idle;
+            const bool candidate = idle && board.extRead8(0xc0f82e) == 0 && board.extRead8(0xc0f82f) == 0
+                && board.midiInBacklog() == 0 && panelBoundary(board, buttons, true);
+            if(candidate) { ++candidateSamples; gap = 0; }
+            else { ++gap; longestGap = std::max(longestGap, gap); }
+        }
+        std::vector<std::pair<uint32_t,unsigned>> ranked(pcs.begin(), pcs.end());
+        std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+        std::cout << "idle-scenario=" << scenario << " idle-samples=" << idleSamples
+                  << " coherent-candidates=" << candidateSamples << " longest-gap=" << longestGap
+                  << " remaining-midi=" << board.midiInBacklog() << " priorities=";
+        for(const auto& [priority,count] : priorities) std::cout << ' ' << std::hex << priority << ':' << std::dec << count;
+        std::cout << " top-pcs=";
+        for(size_t index = 0; index < std::min<size_t>(8, ranked.size()); ++index)
+            std::cout << ' ' << std::hex << ranked[index].first << ':' << std::dec << ranked[index].second;
+        std::cout << '\n' << std::flush;
+        if(scenario == 0) quietGateSeen = candidateSamples != 0;
+    }
+    return quietGateSeen ? 0 : 1;
+}
+
+struct JournalAction
+{
+    unsigned sample;
+    bool isMidi;
+    uint32_t buttons;
+    uint8_t value;
+};
+
+struct PanelEdgeQueue
+{
+    std::deque<uint32_t> pending;
+    uint32_t current = 0;
+    bool awaitingAck = false;
+
+    void service(Probe& board)
+    {
+        if(awaitingAck && panelBoundary(board, current, true)) awaitingAck = false;
+        if(!awaitingAck && !pending.empty())
+        {
+            current = pending.front(); pending.pop_front();
+            board.setButtons(current); awaitingAck = true;
+        }
+    }
+};
+
+static void acceptAction(Probe& board, PanelEdgeQueue& queue, const JournalAction& action)
+{
+    if(!action.isMidi) queue.pending.push_back(action.buttons);
+    else
+    {
+        synthLib::SMidiEvent event(synthLib::MidiEventSource::Host);
+        event.a = 0xb1; event.b = 7; event.c = action.value;
+        board.addMidiEvent(event, 0);
+    }
+}
+
+static unsigned resolveJournal(Probe& board, PanelEdgeQueue& queue)
+{
+    // Diagnostic bound only. A held button is never released or waited on indefinitely.
+    for(unsigned sample = 0; sample < 32000; ++sample)
+    {
+        queue.service(board);
+        if(queue.pending.empty() && !queue.awaitingAck && coherentBoundary(board, queue.current)) return sample;
+        board.renderSample();
+    }
+    throw std::runtime_error("journal resolution exceeded diagnostic observation window");
+}
+
+static std::unique_ptr<Probe> settingsBoard(const std::vector<uint8_t>& rom,
+                                          const std::vector<uint8_t>& waves,
+                                          const std::vector<uint8_t>& image)
+{
+    auto board = std::make_unique<Probe>(rom, waves, false);
+    if(Sc88ProSettings::restore(*board, image) != Sc88ProSettings::Result::Success)
+        throw std::runtime_error("journal candidate settings restore failed");
+    return board;
+}
+
+static int testJournalReplay(const std::vector<uint8_t>& rom, const std::vector<uint8_t>& waves, bool orderingOnly = false)
+{
+    bool allEqual = true;
+    // Capture different real firmware execution phases; the last cases interleave CC7.
+    for(unsigned scenario = orderingOnly ? 8 : 0; scenario < (orderingOnly ? 9u : 8u); ++scenario)
+    {
+        auto live = std::make_unique<Probe>(rom, waves);
+        run(*live, 32000*10);
+        press(*live, uint32_t{1} << unsigned(Sc88ProButton::PartR));
+        if(scenario >= 7) press(*live, uint32_t{1} << unsigned(Sc88ProButton::UserInst));
+        PanelEdgeQueue liveQueue;
+        resolveJournal(*live, liveQueue);
+        std::vector<uint8_t> checkpoint;
+        if(Sc88ProSettings::capture(*live, checkpoint) != Sc88ProSettings::Result::Success)
+            throw std::runtime_error("journal checkpoint capture failed");
+        const bool held = scenario == 4 || scenario == 5;
+        std::vector<JournalAction> actions{{0,false,uint32_t{1} << unsigned(Sc88ProButton::LevelR),0}};
+        if(!held) actions.push_back({64,false,0,0});
+        if(scenario == 6 || scenario == 7) actions.push_back({96,true,0,80});
+        const auto levelAddress = ramWord(*live,0xcf7c)+8;
+        const auto initialLevel = live->extRead8(0xc00000+levelAddress);
+        bool orderingMidiAccepted = false;
+        std::vector<JournalAction> accepted;
+        unsigned elapsed = 0;
+        bool phaseFound = false;
+        for(; elapsed < 8000; ++elapsed)
+        {
+            if(scenario == 8 && !orderingMidiAccepted && live->extRead8(0xc00000+levelAddress) != initialLevel)
+            {
+                // Deliberately straddle an observed semantic boundary, not a guessed delay.
+                actions.push_back({elapsed,true,0,80}); orderingMidiAccepted = true;
+                std::cout << "journal-ordering-cc-sample=" << elapsed << '\n';
+            }
+            for(const auto& action : actions)
+                if(action.sample == elapsed) { acceptAction(*live, liveQueue, action); accepted.push_back(action); }
+            liveQueue.service(*live);
+            live->renderSample();
+            const auto nativeTask = ramWord(*live, 0xf87a);
+            const auto priority = ramWord(*live, 0xf800);
+            const bool scanner = nativeTask == 0xf840 && ramWord(*live, 0xf82e) == 0;
+            const bool ui = nativeTask == 0xf850 && ramWord(*live, 0xf82e) == 0;
+            const bool afterRelease = elapsed >= 64;
+            const bool target = scenario == 0 ? elapsed == 64
+                : scenario == 1 ? afterRelease && scanner
+                : scenario == 2 ? afterRelease && ui
+                : scenario == 3 ? afterRelease && liveQueue.pending.empty() && !liveQueue.awaitingAck && coherentBoundary(*live, 0)
+                : scenario == 4 ? scanner
+                : scenario == 5 ? ui
+                : scenario == 6 ? elapsed >= 96 && priority == 2 && ramWord(*live, 0xf82e) == 0
+                : scenario == 7 ? elapsed >= 96 && ui
+                : orderingMidiAccepted && priority == 2 && ramWord(*live,0xf82e) == 0;
+            if(target) { ++elapsed; phaseFound = true; break; }
+        }
+        if(!phaseFound)
+        {
+            std::cout << "journal-scenario=" << scenario << " capture-phase-not-found\n";
+            allEqual = false; continue;
+        }
+        const auto frozenCycles = live->cycles();
+        std::cout << "journal-scenario=" << scenario << " capture-sample=" << elapsed
+                  << " capture-pc=" << std::hex << Sc88ProSettingsProbe::pc(*live)
+                  << " task=" << ramWord(*live,0xf87a) << std::dec << " accepted=" << accepted.size()
+                  << " held=" << held << '\n' << std::flush;
+        auto shadow = settingsBoard(rom, waves, checkpoint);
+        copyPanelContext(*shadow, checkpoint);
+        PanelEdgeQueue shadowQueue;
+        resolveJournal(*shadow, shadowQueue);
+        for(unsigned sample = 0; sample < elapsed; ++sample)
+        {
+            for(const auto& action : accepted)
+                if(action.sample == sample) acceptAction(*shadow, shadowQueue, action);
+            shadowQueue.service(*shadow);
+            shadow->renderSample();
+        }
+        const auto shadowDrain = resolveJournal(*shadow, shadowQueue);
+        if(live->cycles() != frozenCycles) throw std::runtime_error("private replay advanced original board");
+        const auto liveDrain = resolveJournal(*live, liveQueue);
+        std::vector<uint8_t> liveImage, shadowImage;
+        if(Sc88ProSettings::capture(*live, liveImage) != Sc88ProSettings::Result::Success ||
+           Sc88ProSettings::capture(*shadow, shadowImage) != Sc88ProSettings::Result::Success)
+            throw std::runtime_error("journal resolved capture failed");
+        std::cout << "journal-drain live=" << liveDrain << " shadow=" << shadowDrain
+                  << " level-live=" << unsigned(liveImage[ramWord(*live,0xcf7c)+8])
+                  << " level-shadow=" << unsigned(shadowImage[ramWord(*shadow,0xcf7c)+8]) << '\n';
+        if(scenario == 8) allEqual &= liveImage[levelAddress] == 80;
+        // Dump from fresh boards so the oracle cannot release an intentionally held key.
+        auto nativeLive = settingsBoard(rom, waves, liveImage);
+        auto nativeShadow = settingsBoard(rom, waves, shadowImage);
+        const auto referenceDump = dump(*nativeLive);
+        const auto candidateDump = dump(*nativeShadow);
+        allEqual &= compare(referenceDump, candidateDump, "checkpoint-journal-replay");
     }
     return allEqual ? 0 : 1;
 }
@@ -483,6 +719,9 @@ static int runProbe(int argc, char** argv)
         else if(option == "--panel-boundary") panelBoundaryFixture = true;
         else if(option == "--production-adapter") useProductionAdapter = true;
         else if(option == "--panel-clone") panelCloneFixture = true;
+        else if(option == "--idle-boundary") idleBoundaryFixture = true;
+        else if(option == "--journal-replay") journalFixture = true;
+        else if(option == "--journal-ordering") journalOrderingFixture = true;
         else return 2;
     }
     baseLib::disableErrorDialogs();
@@ -500,6 +739,9 @@ static int runProbe(int argc, char** argv)
     auto& source = *sourceOwner;
     if(!source.isValid()) return 3;
     run(source, 32000 * 10); screen(source, "booted");
+    if(idleBoundaryFixture) return traceIdleBoundary(source);
+    if(journalFixture) return testJournalReplay(rom, waves);
+    if(journalOrderingFixture) return testJournalReplay(rom, waves, true);
     if(panelCloneFixture) return testPanelClone(rom, waves);
     if(panelBoundaryFixture)
     {

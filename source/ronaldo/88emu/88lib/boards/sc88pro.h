@@ -218,6 +218,7 @@ namespace emu88Lib
 
 	private:
 		friend class Sc88ProSettings;
+		friend struct Sc88ProSettingsProbe;
 		// Set up the bus map and the chip's host hooks. Runs once, from the
 		// constructor.
 		void    wireChip();
