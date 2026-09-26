@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -105,6 +106,9 @@ namespace emu88Lib
 		void clickPanelButton(uint32_t pressedButtons, uint32_t releasedButtons);
 		// Exclusive owner snapshots the board and accepted input; drain outside live locks.
 		std::unique_ptr<HardwareDevice> cloneForCapture() const;
+		std::function<std::unique_ptr<HardwareDevice>()> prepareCaptureClone() const;
+		bool acceptsCaptureFrom(const HardwareDevice& source) const;
+		bool copyCaptureFrom(const HardwareDevice& source);
 		bool isSettingsBoundary() const;
 		SettingsChunk captureSettings() const;
 		void advanceCaptureFrame();
@@ -134,7 +138,8 @@ namespace emu88Lib
 
 	private:
 		struct CaptureTag {};
-		HardwareDevice(const HardwareDevice& source, CaptureTag);
+		HardwareDevice(const synthLib::DeviceCreateParams& params, DeviceModel model,
+		               std::unique_ptr<Sc88Pro> board, CaptureTag);
 		enum class PanelCommandType : uint8_t { Buttons, Encoder };
 		struct PanelCommand
 		{

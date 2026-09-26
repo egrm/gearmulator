@@ -257,14 +257,35 @@ namespace emu88Lib
 
 	HardwareDevice::~HardwareDevice() = default;
 
-	HardwareDevice::HardwareDevice(const HardwareDevice& source, CaptureTag)
-		: synthLib::Device(source.getDeviceCreateParams()), m_model(source.m_model)
+	HardwareDevice::HardwareDevice(const synthLib::DeviceCreateParams& params, const DeviceModel model,
+	                               std::unique_ptr<Sc88Pro> board, CaptureTag)
+		: synthLib::Device(params), m_model(model), m_sc88Pro(std::move(board))
 	{
-		if(m_model != DeviceModel::Sc88Pro || !source.m_sc88Pro)
+	}
+
+	std::function<std::unique_ptr<HardwareDevice>()> HardwareDevice::prepareCaptureClone() const
+	{
+		if(m_model != DeviceModel::Sc88Pro || !m_sc88Pro)
 			throw std::runtime_error("Settings capture adapter unavailable for this model");
-		m_sc88Pro = source.m_sc88Pro->cloneExecution();
+		return [params = getDeviceCreateParams(), model = m_model,
+		        prepareBoard = m_sc88Pro->prepareExecutionClone()]() mutable
+		{
+			auto board = prepareBoard();
+			if(!board) return std::unique_ptr<HardwareDevice>{};
+			return std::unique_ptr<HardwareDevice>(new HardwareDevice(params, model, std::move(board), CaptureTag{}));
+		};
+	}
+
+	bool HardwareDevice::acceptsCaptureFrom(const HardwareDevice& source) const
+	{
+		return m_model == source.m_model && m_sc88Pro && source.m_sc88Pro &&
+		       m_sc88Pro->acceptsExecutionFrom(*source.m_sc88Pro);
+	}
+
+	bool HardwareDevice::copyCaptureFrom(const HardwareDevice& source)
+	{
+		if(!acceptsCaptureFrom(source) || !m_sc88Pro->copyExecutionFrom(*source.m_sc88Pro)) return false;
 		m_assetDigests = source.m_assetDigests;
-		if(!m_sc88Pro) throw std::runtime_error("Exact board clone rejected");
 		m_midiIn = source.m_midiIn;
 		m_sc88ProMidiOut = source.m_sc88ProMidiOut;
 		m_sc88ProMidiOutOffsets = source.m_sc88ProMidiOutOffsets;
@@ -285,11 +306,14 @@ namespace emu88Lib
 		m_dacBits = source.m_dacBits;
 		m_boardGain = source.m_boardGain;
 		// Analog audio history cannot influence firmware. Its exact hold phase can.
+		return true;
 	}
 
 	std::unique_ptr<HardwareDevice> HardwareDevice::cloneForCapture() const
 	{
-		return std::unique_ptr<HardwareDevice>(new HardwareDevice(*this, CaptureTag{}));
+		auto copy = prepareCaptureClone()();
+		if(!copy || !copy->copyCaptureFrom(*this)) throw std::runtime_error("Exact board clone rejected");
+		return copy;
 	}
 
 	bool HardwareDevice::isSettingsBoundary() const

@@ -7,9 +7,68 @@
 #include "common/test_util.hpp"
 #include "baseLib/os.h"
 #include <iostream>
+#include <chrono>
+#include <thread>
 
 namespace
 {
+    void measureConcurrentSave(emu88Player::Processor& processor)
+    {
+        // A diagnostic workload, not a scheduler-dependent CI timing assertion.
+        // No device is opened: one worker saves while the caller renders blocks.
+        constexpr int frames = 64;
+        constexpr double rate = 48000;
+        constexpr size_t saveCount = 8;
+        processor.setRateAndBufferSizeDetails(rate, frames);
+        processor.prepareToPlay(rate, frames);
+        std::atomic<bool> started{false}, finished{false};
+        std::exception_ptr error;
+        std::array<juce::MemoryBlock, saveCount> saved;
+        juce::AudioBuffer<float> buffer(2, frames);
+        juce::MidiBuffer midi;
+        std::thread saver([&]
+        {
+            while(!started.load()) std::this_thread::yield();
+            try
+            {
+                for(auto& state : saved) processor.getStateInformation(state);
+            }
+            catch(...) { error = std::current_exception(); }
+            finished.store(true);
+        });
+        double maximumWaitMs{}, maximumBlockMs{};
+        size_t blocks{};
+        std::exception_ptr renderError;
+        started.store(true);
+        try
+        {
+            while(!finished.load())
+            {
+                const auto begin = std::chrono::steady_clock::now();
+                {
+                    const juce::ScopedLock lock(processor.getCallbackLock());
+                    const auto acquired = std::chrono::steady_clock::now();
+                    maximumWaitMs = std::max(maximumWaitMs,
+                        std::chrono::duration<double, std::milli>(acquired - begin).count());
+                    processor.processBlock(buffer, midi);
+                }
+                maximumBlockMs = std::max(maximumBlockMs,
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());
+                ++blocks;
+                std::this_thread::yield();
+            }
+        }
+        catch(...) { renderError = std::current_exception(); }
+        saver.join();
+        if(error) std::rethrow_exception(error);
+        if(renderError) std::rethrow_exception(renderError);
+        for(const auto& state : saved) CHECK(state.getSize() > 0);
+        std::cout << "capture-timing saves=" << saveCount << " blocks=" << blocks
+                  << " maximum-callback-lock-wait-ms=" << maximumWaitMs
+                  << " maximum-render-block-ms=" << maximumBlockMs
+                  << " host-block-budget-ms=" << frames / rate * 1000 << '\n';
+    }
+
     juce::MemoryBlock save(emu88Player::Processor& processor)
     {
         juce::MemoryBlock result;
@@ -67,7 +126,7 @@ namespace
     }
 }
 
-int main()
+int main(int argc, char** argv)
 {
     if(!std::getenv("TUS_DATA_FOLDER") || !std::getenv("TUS_TEST_ROM_DIR")) return 77;
     baseLib::disableErrorDialogs();
@@ -81,6 +140,12 @@ int main()
         emu88Player::Processor first;
         CHECK(first.hasValidRom());
         CHECK(!first.portMidiEnabled());
+        if(argc > 1 && std::string(argv[1]) == "--capture-timing")
+        {
+            measureConcurrentSave(first);
+            emu88Player::standaloneLaunch = nullptr;
+            return test::finish("88emuCaptureTiming");
+        }
         first.setRateAndBufferSizeDetails(44100, 128);
         first.prepareToPlay(44100, 128);
         juce::MidiBuffer setup;

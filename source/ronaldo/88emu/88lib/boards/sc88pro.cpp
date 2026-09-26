@@ -102,15 +102,38 @@ namespace emu88Lib
 		}
 	}
 
-	Sc88Pro::Sc88Pro(const Sc88Pro& source, ExecutionCloneTag)
-		: m_rom(source.m_rom), m_firmwareHash(source.m_firmwareHash), m_waveRom(source.m_waveRom)
+	Sc88Pro::Sc88Pro(std::vector<uint8_t> firmware, baseLib::MD5 fingerprint,
+	                 std::shared_ptr<const std::vector<uint8_t>> waves, ExecutionCloneTag)
+		: m_rom(std::move(firmware)), m_firmwareHash(fingerprint), m_waveRom(std::move(waves))
 		, m_subMcu([this](Sc88SubMcu::Record&& record) { m_midiInQueue.emplace_back(std::move(record)); },
 		           SmSysExStage, SmCommand - SmSysExStage)
-		, m_lsp(source.m_lsp)
 	{
 		wireChip();
 		mapWaveRom();
 		m_xp.setInterruptCallback([this](bool level) { requestIrq(IrqXp, level); });
+		m_captureShell = true;
+	}
+
+	std::function<std::unique_ptr<Sc88Pro>()> Sc88Pro::prepareExecutionClone() const
+	{
+		return [firmware = m_rom, fingerprint = m_firmwareHash, waves = m_waveRom]() mutable
+		{
+			if(!waves) return std::unique_ptr<Sc88Pro>{};
+			return std::unique_ptr<Sc88Pro>(new Sc88Pro(std::move(firmware), fingerprint, std::move(waves), ExecutionCloneTag{}));
+		};
+	}
+
+	bool Sc88Pro::acceptsExecutionFrom(const Sc88Pro& source) const
+	{
+		return m_captureShell && source.m_valid && !source.m_machine.cpu().in_slice() &&
+		       m_firmwareHash == source.m_firmwareHash && m_waveRom == source.m_waveRom;
+	}
+
+	bool Sc88Pro::copyExecutionFrom(const Sc88Pro& source)
+	{
+		if(!acceptsExecutionFrom(source)) return false;
+		m_captureShell = false;
+		m_lsp.copyRuntimeFrom(source.m_lsp);
 		m_xp.copyRuntimeFrom(source.m_xp);
 		m_subMcu.copyRuntimeFrom(source.m_subMcu);
 		m_sram = source.m_sram;
@@ -148,18 +171,19 @@ namespace emu88Lib
 		m_lcd.setChangeCallback({});
 		m_lcd.setCgRamChangeCallback({});
 		m_lcd.setCursorChangeCallback({});
+		return m_machine.copy_runtime_from_510(source.m_machine,
+			[this, &source](void* owner) -> std::optional<void*>
+			{
+				if(owner == &source) return this;
+				return std::nullopt;
+			});
 	}
 
 	std::unique_ptr<Sc88Pro> Sc88Pro::cloneExecution() const
 	{
 		if(!m_valid || m_machine.cpu().in_slice()) return {};
-		auto result = std::unique_ptr<Sc88Pro>(new Sc88Pro(*this, ExecutionCloneTag{}));
-		if(!result->m_machine.copy_runtime_from_510(m_machine,
-			[this, &result](void* owner) -> std::optional<void*>
-			{
-				if(owner == this) return result.get();
-				return std::nullopt;
-			})) return {};
+		auto result = prepareExecutionClone()();
+		if(!result->copyExecutionFrom(*this)) return {};
 		return result;
 	}
 

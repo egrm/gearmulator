@@ -176,6 +176,11 @@ namespace emu88Lib
 		// Exclusive-owner use between completed native samples. No boot or time rebasing.
 		// Returns null if a scheduler context cannot be safely rebound.
 		std::unique_ptr<Sc88Pro> cloneExecution() const;
+		// Capture immutable construction inputs under the owner lock. Invoke the
+		// returned one-use factory outside it, then copy execution under the lock.
+		std::function<std::unique_ptr<Sc88Pro>()> prepareExecutionClone() const;
+		bool acceptsExecutionFrom(const Sc88Pro& source) const;
+		bool copyExecutionFrom(const Sc88Pro& source);
 
 		// MIDI in. Which path is used is decided from the ROM's own vector
 		// table: a board whose IRQ2 vector is the unused-vector stub has no
@@ -225,7 +230,9 @@ namespace emu88Lib
 		friend class Sc88ProSettings;
 		friend struct Sc88ProSettingsProbe;
 		struct ExecutionCloneTag {};
-		Sc88Pro(const Sc88Pro& source, ExecutionCloneTag);
+		Sc88Pro(std::vector<uint8_t> firmware, baseLib::MD5 fingerprint,
+		        std::shared_ptr<const std::vector<uint8_t>> waves, ExecutionCloneTag);
+		bool m_captureShell = false;
 		void mapWaveRom();
 		// Set up the bus map and the chip's host hooks. Runs once, from the
 		// constructor.

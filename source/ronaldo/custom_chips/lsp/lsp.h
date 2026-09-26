@@ -60,6 +60,12 @@ namespace lspLib
 		// edit requests its own compilation; source workers are never borrowed.
 		LSPDispatcher(const LSPDispatcher& source) : LSPDispatcher()
 		{
+			copyRuntimeFrom(source);
+		}
+		// Only a fresh dispatcher may receive this snapshot: its worker has no
+		// requests and its JIT has no compiled program to invalidate or share.
+		void copyRuntimeFrom(const LSPDispatcher& source)
+		{
 			*m_runtime = *source.m_runtime;
 			*m_program = *source.m_program;
 			m_config = source.m_config;

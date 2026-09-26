@@ -5,6 +5,7 @@
 #include "88lib/rom/romloader.h"
 
 #include <cmath>
+#include <chrono>
 #include <stdexcept>
 
 namespace emu88Player
@@ -127,8 +128,15 @@ namespace emu88Player
                                            : std::make_unique<juce::XmlElement>("Payload");
             jucePlayer::MidiPlayer::PersistentSnapshot playerSnapshot;
             std::vector<uint8_t> cardBytes;
+            // Use the existing capture failure budget for continuous model changes;
+            // elapsed wall time is never taken as evidence of a coherent snapshot.
+            const auto preparationDeadline = std::chrono::steady_clock::now() +
+                std::chrono::seconds(captureWatchdogSeconds);
+            for(;;)
             {
                 const juce::ScopedLock lock(getCallbackLock());
+                if(std::chrono::steady_clock::now() >= preparationDeadline)
+                    throw std::runtime_error("Capture preparation could not stabilize before its watchdog expired");
                 if(m_loadedStateUnchanged && m_loadedState.getSize() &&
                    m_loadedPlaylistRevision == m_midiPlayer.playlistRevision() &&
                    m_loadedPlayerStatusRevision == m_midiPlayer.status().revision &&
@@ -140,6 +148,26 @@ namespace emu88Player
                     const juce::ScopedUnlock unlocked(getCallbackLock());
                     destination = m_loadedState;
                     return;
+                }
+                // Construct buses, chip memory and private compiler workers without
+                // holding up audio. Construction inputs own immutable asset copies;
+                // no live board pointer escapes this lock. Recheck compatibility in
+                // case the user changed models while the shell was being allocated.
+                if(m_device && !m_device->isValid())
+                    throw std::runtime_error("Cannot capture unavailable hardware without a loaded recovery state");
+                if(m_device && (!board || !board->acceptsCaptureFrom(*m_device)))
+                {
+                    auto prepare = m_device->prepareCaptureClone();
+                    const juce::ScopedUnlock unlocked(getCallbackLock());
+                    board = prepare();
+                    if(!board) throw std::runtime_error("Capture shell construction failed");
+                    continue;
+                }
+                if(!m_device && board)
+                {
+                    const juce::ScopedUnlock unlocked(getCallbackLock());
+                    board.reset();
+                    continue;
                 }
                 payload->setAttribute("model", static_cast<int>(m_deviceModel));
                 if(!m_unavailableState) payload->setAttribute("power", m_device != nullptr);
@@ -154,15 +182,15 @@ namespace emu88Player
                 cardBytes = m_pcmCard;
                 if(m_device)
                 {
-                    if(!m_device->isValid()) throw std::runtime_error("Cannot capture unavailable hardware without a loaded recovery state");
                     // Hosted instances do not acquire physical input. Refuse rather than
                     // destructively draining a standalone collector at a different wall time.
                     if(m_liveMidiPending) throw std::runtime_error("Standalone physical input is pending; collector capture is not implemented");
-                    board = m_device->cloneForCapture();
+                    if(!board->copyCaptureFrom(*m_device)) throw std::runtime_error("Exact board clone rejected");
                     engine = m_engine->cloneForCapture(board.get());
                     payload->setAttribute("assets", assetIdentity(m_device->assetDigests()));
                 }
                 else if(!m_unavailableState) payload->deleteAllChildElementsWithTagName("Hardware");
+                break;
             }
             replaceChild(*payload, "Player", playerSnapshot.toXml());
             auto card = std::make_unique<juce::XmlElement>("Card");

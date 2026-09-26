@@ -992,14 +992,37 @@ static int testExecutionClone(const std::vector<uint8_t>& rom, const std::vector
             if(live->renderSample() != out) throw std::runtime_error("clone PCM continuation differs");
         requireSameExecution(*live,*clone);
     }
+    // The factory owns its ROM and waves, while the execution cut is taken
+    // later. Advancing the source between those steps must copy the later cut.
+    auto prepare=live->prepareExecutionClone();
+    auto prepared=prepare();
+    if(!prepared || prepare())
+        throw std::runtime_error("prepared clone factory did not enforce one use");
+    run(*live,37);
+    if(!prepared->copyExecutionFrom(*live))
+        throw std::runtime_error("prepared shell rejected its advanced source");
+    requireSameExecution(*live,*prepared);
+    if(prepared->copyExecutionFrom(*live))
+        throw std::runtime_error("prepared shell accepted a second execution copy");
+
+    // The factory must outlive its original board and accept an independent
+    // execution clone with the same immutable assets as the later source.
+    auto detachedFactory=live->prepareExecutionClone();
     auto survivor=live->cloneExecution();
     auto control=live->cloneExecution();
     live.reset();
+    auto detached=detachedFactory();
+    if(!detached || !detached->copyExecutionFrom(*survivor))
+        throw std::runtime_error("detached factory lost its immutable assets");
     for(unsigned frame=0; frame<g_sampleRate; ++frame)
-        if(survivor->renderSample() != control->renderSample())
+    {
+        const auto expected=control->renderSample();
+        if(survivor->renderSample() != expected || detached->renderSample() != expected)
             throw std::runtime_error("clone continuation after source destruction differs");
+    }
     requireSameExecution(*survivor,*control);
-    std::cout << "execution-clone: active EFX PCM, CPU, SRAM, panel, MIDI, host latches, isolation and source destruction passed\n";
+    requireSameExecution(*detached,*control);
+    std::cout << "execution-clone: active EFX PCM, CPU, SRAM, panel, MIDI, host latches, prepared ownership and source destruction passed\n";
     return 0;
 }
 
