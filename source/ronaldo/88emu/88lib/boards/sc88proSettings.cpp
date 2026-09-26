@@ -62,6 +62,21 @@ namespace emu88Lib
 		// page 0 and effect page 7 through 0C:8AFB/8B0D. The firmware rebuilds
 		// its own display and descriptors; no task, timer, or LCD bytes are copied.
 		constexpr size_t g_panelPage = 0x4b47;
+		// ROM 0C:94C9/9500 enter normal-part edit page 2 with both PART keys;
+		// 0C:954C returns to page 0. The menu cursor is the word at 4C60,
+		// committed from 4C62 by 0C:5CC8..5CCC. SC-88 MAP dispatches through
+		// 0D:88C2[2] to 0C:89FF/8A0F, stepping it by 0010. The native upper
+		// endpoint is the 03C0 comparison at 0C:8A13. The alternate branch when
+		// FE2E bit 0 is set also permits cursor 0000 (0C:8956); this validation
+		// accepts that legitimate target without claiming alternate-mode coverage.
+		constexpr uint8_t g_normalPage = 0;
+		constexpr uint8_t g_partEditPage = 2;
+		constexpr size_t g_menuCursor = 0x4c60;
+		constexpr uint16_t g_firstMenuCursor = 0x10;
+		constexpr uint16_t g_lastMenuCursor = 0x3c0;
+		constexpr uint16_t g_menuCursorStep = 0x10;
+		constexpr size_t g_maxMenuMoves =
+			(g_lastMenuCursor - g_firstMenuCursor) / g_menuCursorStep + 1;
 		constexpr uint8_t g_userInstrumentPage = 7;
 		// Same native press/gap timing as Sc88Pro::runFactoryReset, which drives
 		// the actual scanner rather than invoking firmware routines out of context.
@@ -139,6 +154,11 @@ namespace emu88Lib
 			return Result::InvalidImage;
 		const auto selectedPart = readWord(_image, g_selectedPart);
 		if(selectedPart >= g_partCount) return Result::InvalidImage;
+		const auto savedPage = _image[g_panelPage];
+		const auto savedMenuCursor = readWord(_image, g_menuCursor);
+		const auto hasMenuCursor = savedMenuCursor <= g_lastMenuCursor &&
+		                           savedMenuCursor % g_menuCursorStep == uint16_t{};
+		if(savedPage == g_partEditPage && !hasMenuCursor) return Result::InvalidImage;
 		if(_board.m_samplesRendered != unsigned{})
 			return Result::RequiresFreshBoard;
 
@@ -169,7 +189,28 @@ namespace emu88Lib
 			pressPanel(_board, panelButton(Sc88ProButton::InstAll) | panelButton(Sc88ProButton::PartL));
 		for(size_t part{}; part < selectedPart % g_partsPerGroup; ++part)
 			pressPanel(_board, panelButton(Sc88ProButton::PartR));
-		if(_image[g_panelPage] == g_userInstrumentPage)
+		// The firmware keeps 4C60 while other pages are visible. A matching
+		// inactive cursor needs no extra panel actions on the fresh timeline.
+		const auto cursorNeedsRecall = hasMenuCursor &&
+		                               readWord(_board.m_sram, g_menuCursor) != savedMenuCursor;
+		if(savedPage == g_partEditPage ||
+		   ((savedPage == g_normalPage || savedPage == g_userInstrumentPage) && cursorNeedsRecall))
+		{
+			pressPanel(_board, panelButton(Sc88ProButton::PartL) | panelButton(Sc88ProButton::PartR));
+			if(hasMenuCursor)
+			{
+				// Advance through the firmware's own descriptor selection, including
+				// its special jumps. Neither the cursor nor descriptor table is copied.
+				for(size_t move{}; move < g_maxMenuMoves &&
+				    readWord(_board.m_sram, g_menuCursor) != savedMenuCursor; ++move)
+					pressPanel(_board, panelButton(Sc88ProButton::Sc88Map));
+				if(readWord(_board.m_sram, g_menuCursor) != savedMenuCursor)
+					return Result::InvalidImage;
+			}
+			if(savedPage != g_partEditPage)
+				pressPanel(_board, panelButton(Sc88ProButton::PartL) | panelButton(Sc88ProButton::PartR));
+		}
+		if(savedPage == g_userInstrumentPage)
 			pressPanel(_board, panelButton(Sc88ProButton::UserInst));
 		auto& memory = _board.m_sram;
 		for(size_t part{}; part < g_partCount; ++part)

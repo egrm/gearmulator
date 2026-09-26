@@ -89,6 +89,7 @@ static bool executionCloneFixture = false;
 static bool cloneJournalFixture = false;
 static bool cloneOrderingFixture = false;
 static bool panelRecallFixture = false;
+static bool panelMenuRecallFixture = false;
 
 // Test stimuli for receive-state fields identified in the installed ROM's MIDI handlers.
 static const std::array<std::array<uint8_t,3>, 16> extraControllerEvents = {{
@@ -621,6 +622,88 @@ static int testPanelRecall(const std::vector<uint8_t>& rom, const std::vector<ui
     return equal ? 0 : 1;
 }
 
+static void leavePanelMenu(Sc88Pro& board)
+{
+    const auto page = Sc88ProSettingsProbe::read(board, 0x4b47);
+    if(page == 7) press(board, uint32_t{1} << unsigned(Sc88ProButton::UserInst));
+    else if(page == 2)
+        press(board, (uint32_t{1} << unsigned(Sc88ProButton::PartL)) |
+                     (uint32_t{1} << unsigned(Sc88ProButton::PartR)));
+}
+
+static int testPanelMenuRecall(const std::vector<uint8_t>& rom, const std::vector<uint8_t>& waves)
+{
+    bool equal = true;
+    for(unsigned scenario = 0; scenario < 6; ++scenario)
+    {
+        const auto savedContext = scenario % 3;
+        const auto partChord = (uint32_t{1} << unsigned(Sc88ProButton::PartL)) |
+                               (uint32_t{1} << unsigned(Sc88ProButton::PartR));
+        auto live = std::make_unique<Probe>(rom, waves);
+        run(*live, g_sampleRate * 10);
+        if(scenario >= 3)
+            press(*live, (uint32_t{1} << unsigned(Sc88ProButton::InstAll)) |
+                         (uint32_t{1} << unsigned(Sc88ProButton::PartL)));
+        press(*live, uint32_t{1} << unsigned(Sc88ProButton::PartR));
+        press(*live, partChord);
+        // Manual part-menu order and ROM0C:89FF: SC-88 MAP is menu-down,
+        // advancing the descriptor cursor by16. Fine Tune is the fourth entry.
+        for(unsigned next = 0; next < 3; ++next)
+            press(*live, uint32_t{1} << unsigned(Sc88ProButton::Sc88Map));
+        screen(*live,"selected-menu-entry");
+        std::cout << "menu-setup cursor=" << std::hex << ramWord(*live,0x4c60)
+                  << " page=" << unsigned(Sc88ProSettingsProbe::read(*live,0x4b47))
+                  << " part=" << ramWord(*live,0x4d78) << std::dec << '\n';
+        if(ramWord(*live,0x4c60) != 0x40 || Sc88ProSettingsProbe::read(*live,0x4b47) != 2 ||
+           ramWord(*live,0x4d78) != (scenario < 3 ? 1u : 17u))
+            throw std::runtime_error("part-menu fixture did not select Fine Tune on requested part");
+        if(savedContext)
+        {
+            leavePanelMenu(*live);
+            if(savedContext == 2) press(*live,uint32_t{1} << unsigned(Sc88ProButton::UserInst));
+        }
+        unsigned boundarySamples = 0;
+        while(!Sc88ProSettings::isCaptureBoundary(*live,false) && boundarySamples++ < g_sampleRate)
+            live->renderSample();
+        if(!Sc88ProSettings::isCaptureBoundary(*live,false))
+            throw std::runtime_error("part-menu fixture failed to reach capture boundary");
+        std::vector<uint8_t> captured;
+        if(Sc88ProSettings::capture(*live,captured) != Sc88ProSettings::Result::Success)
+            throw std::runtime_error("part-menu capture failed");
+        auto restored = std::make_unique<Probe>(rom,waves,false);
+        if(Sc88ProSettings::restore(*restored,captured) != Sc88ProSettings::Result::Success)
+            throw std::runtime_error("part-menu restore failed");
+        std::cout << "part-menu-scenario=" << scenario << " saved-context=" << savedContext << '\n';
+        screen(*live,"original-menu-context"); screen(*restored,"restored-menu-context");
+        equal &= live->lcd().getDdRam() == restored->lcd().getDdRam();
+        {
+            auto before = live->cloneExecution(), after = restored->cloneExecution();
+            leavePanelMenu(*before); leavePanelMenu(*after);
+            equal &= compare(dump(*before),dump(*after),"part-menu-preclick-parameters");
+        }
+        // Inactive page context must remember its cursor when re-entered.
+        for(Sc88Pro* board : {static_cast<Sc88Pro*>(live.get()),static_cast<Sc88Pro*>(restored.get())})
+            if(Sc88ProSettingsProbe::read(*board,0x4b47) != 2)
+            {
+                leavePanelMenu(*board);
+                press(*board,partChord);
+            }
+        std::cout << "menu-cursor-before-next-click=" << std::hex << ramWord(*live,0x4c60)
+                  << '/' << ramWord(*restored,0x4c60) << std::dec << '\n';
+        // This verifies the firmware's own remembered behavior, independent of restore.
+        if(ramWord(*live,0x4c60) != 0x40)
+            throw std::runtime_error("native firmware did not remember menu cursor as expected");
+        equal &= ramWord(*live,0x4c60) == ramWord(*restored,0x4c60);
+        press(*live,uint32_t{1} << unsigned(Sc88ProButton::InstR));
+        press(*restored,uint32_t{1} << unsigned(Sc88ProButton::InstR));
+        screen(*live,"original-menu-next-click"); screen(*restored,"restored-menu-next-click");
+        equal &= live->lcd().getDdRam() == restored->lcd().getDdRam();
+        leavePanelMenu(*live); leavePanelMenu(*restored);
+        equal &= compare(dump(*live),dump(*restored),"part-menu-postclick-parameters");
+    }
+    return equal ? 0 : 1;
+}
+
 static int traceIdleBoundary(Probe& board)
 {
     // Source candidate: dispatcher empty-ready-queue loop00:065B/065F/0662.
@@ -936,6 +1019,7 @@ static int runProbe(int argc, char** argv)
         else if(option == "--production-adapter") useProductionAdapter = true;
         else if(option == "--panel-clone") panelCloneFixture = true;
         else if(option == "--panel-recall") panelRecallFixture = true;
+        else if(option == "--panel-menu-recall") panelMenuRecallFixture = true;
         else if(option == "--idle-boundary") idleBoundaryFixture = true;
         else if(option == "--journal-replay") journalFixture = true;
         else if(option == "--journal-ordering") journalOrderingFixture = true;
@@ -967,6 +1051,7 @@ static int runProbe(int argc, char** argv)
     if(journalOrderingFixture) return testJournalReplay(rom, waves, true);
     if(panelCloneFixture) return testPanelClone(rom, waves);
     if(panelRecallFixture) return testPanelRecall(rom, waves);
+    if(panelMenuRecallFixture) return testPanelMenuRecall(rom, waves);
     if(panelBoundaryFixture)
     {
         const bool pressed = tracePanelBoundary(source, uint32_t{1} << unsigned(Sc88ProButton::LevelR), "level-down");

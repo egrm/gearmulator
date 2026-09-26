@@ -10,6 +10,13 @@
 
 using namespace emu88Lib;
 
+// SC-88Pro ROM 0C:94C9/9500 enters page 2; 0C:5CC8 commits the
+// descriptor cursor at 4C60, and 0C:8A38 advances it in steps of 0010.
+static constexpr size_t g_panelPageAddress = 0x4b47;
+static constexpr uint8_t g_partEditPage = 2;
+static constexpr size_t g_menuCursorAddress = 0x4c60;
+static constexpr uint16_t g_invalidUnalignedCursor = 0x11;
+
 static std::vector<uint8_t> read(const std::filesystem::path& path)
 {
     std::ifstream stream(path, std::ios::binary);
@@ -49,6 +56,12 @@ int main()
     invalidSelection[0x4d79] = 32;
     check(Sc88ProSettings::restore(*fresh, invalidSelection) == Result::InvalidImage,
           "reject selected part outside both sixteen-part groups");
+    auto invalidMenuCursor = image;
+    invalidMenuCursor[g_panelPageAddress] = g_partEditPage;
+    invalidMenuCursor[g_menuCursorAddress] = static_cast<uint8_t>(g_invalidUnalignedCursor >> 8);
+    invalidMenuCursor[g_menuCursorAddress + sizeof(uint8_t)] = static_cast<uint8_t>(g_invalidUnalignedCursor);
+    check(Sc88ProSettings::restore(*fresh, invalidMenuCursor) == Result::InvalidImage,
+          "reject unaligned normal-part menu cursor before boot");
     check(fresh->cycles() == originalCycles, "invalid image cannot run board");
     check(Sc88ProSettings::restore(*fresh, image) == Result::Success, "restore supported fresh board");
     const auto restoredCycles = fresh->cycles();
