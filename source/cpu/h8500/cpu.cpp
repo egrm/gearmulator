@@ -11,6 +11,29 @@ Cpu::Cpu(Bus& bus, const ChipConfig& cfg) : bus_(bus), cfg_(cfg) {
 
 Cpu::~Cpu() { bus_.set_code_sink(nullptr); }
 
+bool Cpu::copy_runtime_from(const Cpu& source) {
+  if (in_slice() || source.in_slice() || cfg_.model != source.cfg_.model ||
+      cfg_.mode != source.cfg_.mode) return false;
+  SliceCore::copy_runtime_from(source);
+  regs_ = source.regs_;
+  max_mode_ = source.max_mode_;
+  sleeping_ = source.sleeping_;
+  irq_taken_ = source.irq_taken_;
+  irq_level_ = source.irq_level_;
+  irq_vector_ = source.irq_vector_;
+  last_attr_ = source.last_attr_;
+  mask_changed_ = source.mask_changed_;
+  mask_effective_at_ = source.mask_effective_at_;
+  deferred_boundary_ = source.deferred_boundary_;
+  insn_count_ = source.insn_count_;
+  exc_count_ = source.exc_count_;
+  fault_count_ = source.fault_count_;
+  // Cells are derived from this bus; their pointers must never cross machines.
+  invalidate_all();
+  page_cells_ = nullptr;
+  return true;
+}
+
 void Cpu::reset() {
   max_mode_ = cfg_.max_mode();
   regs_.sr = u16((regs_.sr & ~kT & kSrMask) | kMaskBits);  // T = 0, I2-I0 = 7

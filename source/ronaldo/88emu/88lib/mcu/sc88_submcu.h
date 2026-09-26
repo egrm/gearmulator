@@ -63,6 +63,16 @@ namespace emu88Lib
 		Sc88SubMcu(Sink _sink, uint16_t _stageOffset, uint16_t _stageCapacity);
 		void reset();
 
+		// Copy parsers and queued bytes, retaining the destination mailbox sink.
+		void copyRuntimeFrom(const Sc88SubMcu& source)
+		{
+			m_sources = source.m_sources;
+			m_outputQueue = source.m_outputQueue;
+			m_output = source.m_output;
+			m_outputPhase = source.m_outputPhase;
+			m_outputPause = source.m_outputPause;
+		}
+
 		static constexpr uint8_t TxRead = 0xd4;
 		static constexpr uint8_t TxWrite = 0xd5;
 		using SharedRam = std::array<uint8_t, 0x100>;

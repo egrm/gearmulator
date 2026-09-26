@@ -118,6 +118,42 @@ namespace
 		CHECK(volume.payload == std::vector<uint8_t>({0x7f, 0x7f, 0x04, 0x01, 0x00, 0x64}));
 	}
 
+	void runtimeCopy()
+	{
+		Fixture source, clone;
+		// Independent partial running-status and SysEx input, plus a partially
+		// transmitted packet and queued firmware pause/output behind it.
+		source.input({0x90,60});
+		source.input({0xf0,0x7f,0x7f,0x04},1);
+		source.publish({0xf0,0x41,0x10,0x42,0x12,0x40,0,0x7f,0,0x41,0xf7});
+		source.publish({0xff,0,45});
+		source.publish({0x90,62,99});
+		source.run(37);
+		clone.ram=source.ram;
+		clone.mcu.copyRuntimeFrom(source.mcu);
+		clone.input({100}); clone.input({0x01,0,0x64,0xf7},1);
+		CHECK(source.records.empty()); // Destination sink cannot point back to source.
+		source.input({100}); source.input({0x01,0,0x64,0xf7},1);
+		for(unsigned sample=0; sample<1700; ++sample)
+		{
+			source.run(1); clone.run(1);
+			CHECK(source.ram==clone.ram);
+			std::vector<synthLib::SMidiEvent> a,b;
+			source.mcu.readMidiOut(a); clone.mcu.readMidiOut(b);
+			CHECK_EQ(a.size(),b.size());
+			for(size_t event=0; event<std::min(a.size(),b.size()); ++event)
+				CHECK(a[event].a==b[event].a && a[event].b==b[event].b &&
+				      a[event].c==b[event].c && a[event].sysex==b[event].sysex);
+		}
+		CHECK_EQ(source.records.size(),clone.records.size());
+		for(size_t record=0; record<std::min(source.records.size(),clone.records.size()); ++record)
+		{
+			const auto& a=source.records[record]; const auto& b=clone.records[record];
+			CHECK(a.wireBytes==b.wireBytes && a.command==b.command && a.channel==b.channel &&
+			      a.param1==b.param1 && a.param2==b.param2 && a.payload==b.payload);
+		}
+	}
+
 	void channelMessageRxPort()
 	{
 		for(uint8_t part = 0; part < 32; ++part)
@@ -156,5 +192,6 @@ int main()
 	rawRequests();
 	universalMessages();
 	channelMessageRxPort();
+	runtimeCopy();
 	return finish("sc88_submcu");
 }

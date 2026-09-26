@@ -14,6 +14,7 @@
 #include <array>
 #include <algorithm>
 #include <deque>
+#include <chrono>
 
 using namespace emu88Lib;
 
@@ -22,6 +23,40 @@ namespace emu88Lib
     // Test-only access to instruction-boundary PC; no exploratory production API.
     struct Sc88ProSettingsProbe
     {
+        static uint8_t read(const Sc88Pro& board, unsigned address) { return board.m_sram[address & (Sc88Pro::SramSize-1)]; }
+        static const auto& ram(const Sc88Pro& board) { return board.m_sram; }
+        static bool sameCpu(const Sc88Pro& a, const Sc88Pro& b)
+        {
+            const auto& x = a.m_machine.cpu().regs(); const auto& y = b.m_machine.cpu().regs();
+            return std::equal(std::begin(x.r), std::end(x.r), std::begin(y.r)) &&
+                x.pc == y.pc && x.sr == y.sr && x.cp == y.cp && x.dp == y.dp &&
+                x.ep == y.ep && x.tp == y.tp && x.br == y.br;
+        }
+        static void partialHostWrite(Sc88Pro& board)
+        {
+            board.m_xp.hostWrite8(xpLib::XP::HostAddress::pitchDestination_1200, 0x31);
+            board.m_lsp.hostWrite(lspLib::LSPDispatcher::HostDataHi, 0x12);
+            board.m_lsp.hostWrite(lspLib::LSPDispatcher::HostDataMid, 0x34);
+        }
+        static void finishHostWrite(Sc88Pro& board)
+        {
+            board.m_xp.hostWrite8(xpLib::XP::HostAddress::pitchDestination_1200 + 1, 0x79);
+            board.m_lsp.hostWrite(lspLib::LSPDispatcher::HostDataLo, 0x56);
+            board.m_lsp.hostWrite(lspLib::LSPDispatcher::HostAddrHi, 0);
+            board.m_lsp.hostWrite(lspLib::LSPDispatcher::HostAddrLo, 7);
+        }
+        static void stageProgramChange(Sc88Pro& board)
+        {
+            // Keep the valid program but force its normal next-frame decode/compile path.
+            board.m_lsp.program().taintBits |= lspLib::LSPProgram::TaintStructural;
+        }
+        static bool sameCommittedHostWords(const Sc88Pro& a, const Sc88Pro& b)
+        {
+            return a.m_lsp.readIram(7)==0x123456 && b.m_lsp.readIram(7)==0x123456 &&
+                a.m_xp.state().wideWriteLatch==b.m_xp.state().wideWriteLatch &&
+                a.m_xp.state().voices[0].pitchDestination_1200==
+                    b.m_xp.state().voices[0].pitchDestination_1200;
+        }
         static uint32_t pc(const Sc88Pro& board)
         {
             const auto& regs = board.m_machine.cpu().regs();
@@ -39,6 +74,9 @@ static bool panelCloneFixture = false;
 static bool idleBoundaryFixture = false;
 static bool journalFixture = false;
 static bool journalOrderingFixture = false;
+static bool executionCloneFixture = false;
+static bool cloneJournalFixture = false;
+static bool cloneOrderingFixture = false;
 
 // Test stimuli for receive-state fields identified in the installed ROM's MIDI handlers.
 static const std::array<std::array<uint8_t,3>, 16> extraControllerEvents = {{
@@ -421,30 +459,33 @@ static bool tracePanelBoundary(Probe& board, uint32_t buttons, const char* label
     return false;
 }
 
-static bool panelBoundary(Probe& board, uint32_t buttons, bool allowDeferred)
+static bool panelBoundary(Sc88Pro& board, uint32_t buttons, bool allowDeferred)
 {
     for(unsigned column = 0; column < 4; ++column)
-        if(board.extRead8(0xc0466a+column) != uint8_t(~(buttons >> (column*8))) ||
-           board.extRead8(0xc0466e + column) != board.extRead8(0xc0466a+column)) return false;
+        if(Sc88ProSettingsProbe::read(board, 0xc0466a+column) != uint8_t(~(buttons >> (column*8))) ||
+           Sc88ProSettingsProbe::read(board, 0xc0466e + column) != Sc88ProSettingsProbe::read(board, 0xc0466a+column)) return false;
     if(!allowDeferred)
         for(unsigned key = 0; key < 32; ++key)
-            if(board.extRead8(0xc04696+key)&1) return false;
-    return board.extRead8(0xc04666) == board.extRead8(0xc04668)
-        && board.extRead8(0xc04667) == board.extRead8(0xc04669)
-        && board.extRead8(0xc0f850) == 0x89 && !(board.extRead8(0xc0f851)&9)
-        && board.extRead8(0xc0f840) == 0x81 && !(board.extRead8(0xc0f841)&1);
+            if(Sc88ProSettingsProbe::read(board, 0xc04696+key)&1) return false;
+    return Sc88ProSettingsProbe::read(board, 0xc04666) == Sc88ProSettingsProbe::read(board, 0xc04668)
+        && Sc88ProSettingsProbe::read(board, 0xc04667) == Sc88ProSettingsProbe::read(board, 0xc04669)
+        && Sc88ProSettingsProbe::read(board, 0xc0f850) == 0x89 && !(Sc88ProSettingsProbe::read(board, 0xc0f851)&9)
+        && Sc88ProSettingsProbe::read(board, 0xc0f840) == 0x81 && !(Sc88ProSettingsProbe::read(board, 0xc0f841)&1);
 }
 
-static unsigned ramWord(Probe& board, unsigned address)
+static unsigned ramWord(Sc88Pro& board, unsigned address)
 {
-    return (unsigned(board.extRead8(0xc00000+address)) << 8) | board.extRead8(0xc00000+address+1);
+    return (unsigned(Sc88ProSettingsProbe::read(board, 0xc00000+address)) << 8) | Sc88ProSettingsProbe::read(board, 0xc00000+address+1);
 }
 
-static bool coherentBoundary(Probe& board, uint32_t buttons)
+static bool coherentBoundary(Sc88Pro& board, uint32_t buttons)
 {
     const auto pc = Sc88ProSettingsProbe::pc(board);
-    return (pc == 0x65b || pc == 0x65f || pc == 0x662) && ramWord(board, 0xf82e) == 0
+    const bool expected = (pc == 0x65b || pc == 0x65f || pc == 0x662) && ramWord(board, 0xf82e) == 0
         && board.midiInBacklog() == 0 && panelBoundary(board, buttons, true);
+    const bool actual = Sc88ProSettings::isCaptureBoundary(board,true);
+    if(actual != expected) throw std::runtime_error("production capture boundary differs from audited fixture");
+    return actual;
 }
 
 static void copyPanelContext(Probe& board, const std::vector<uint8_t>& captured)
@@ -568,7 +609,7 @@ struct PanelEdgeQueue
     uint32_t current = 0;
     bool awaitingAck = false;
 
-    void service(Probe& board)
+    void service(Sc88Pro& board)
     {
         if(awaitingAck && panelBoundary(board, current, true)) awaitingAck = false;
         if(!awaitingAck && !pending.empty())
@@ -579,7 +620,7 @@ struct PanelEdgeQueue
     }
 };
 
-static void acceptAction(Probe& board, PanelEdgeQueue& queue, const JournalAction& action)
+static void acceptAction(Sc88Pro& board, PanelEdgeQueue& queue, const JournalAction& action)
 {
     if(!action.isMidi) queue.pending.push_back(action.buttons);
     else
@@ -590,7 +631,7 @@ static void acceptAction(Probe& board, PanelEdgeQueue& queue, const JournalActio
     }
 }
 
-static unsigned resolveJournal(Probe& board, PanelEdgeQueue& queue)
+static unsigned resolveJournal(Sc88Pro& board, PanelEdgeQueue& queue)
 {
     // Diagnostic bound only. A held button is never released or waited on indefinitely.
     for(unsigned sample = 0; sample < 32000; ++sample)
@@ -612,7 +653,7 @@ static std::unique_ptr<Probe> settingsBoard(const std::vector<uint8_t>& rom,
     return board;
 }
 
-static int testJournalReplay(const std::vector<uint8_t>& rom, const std::vector<uint8_t>& waves, bool orderingOnly = false)
+static int testJournalReplay(const std::vector<uint8_t>& rom, const std::vector<uint8_t>& waves, bool orderingOnly = false, bool exactClone = false)
 {
     bool allEqual = true;
     // Capture different real firmware execution phases; the last cases interleave CC7.
@@ -675,16 +716,27 @@ static int testJournalReplay(const std::vector<uint8_t>& rom, const std::vector<
                   << " capture-pc=" << std::hex << Sc88ProSettingsProbe::pc(*live)
                   << " task=" << ramWord(*live,0xf87a) << std::dec << " accepted=" << accepted.size()
                   << " held=" << held << '\n' << std::flush;
-        auto shadow = settingsBoard(rom, waves, checkpoint);
-        copyPanelContext(*shadow, checkpoint);
+        std::unique_ptr<Sc88Pro> shadow;
         PanelEdgeQueue shadowQueue;
-        resolveJournal(*shadow, shadowQueue);
-        for(unsigned sample = 0; sample < elapsed; ++sample)
+        if(exactClone)
         {
-            for(const auto& action : accepted)
-                if(action.sample == sample) acceptAction(*shadow, shadowQueue, action);
-            shadowQueue.service(*shadow);
-            shadow->renderSample();
+            shadow = live->cloneExecution();
+            if(!shadow) throw std::runtime_error("execution clone failed");
+            shadowQueue = liveQueue;
+        }
+        else
+        {
+            auto fresh = settingsBoard(rom, waves, checkpoint);
+            copyPanelContext(*fresh, checkpoint);
+            shadow = std::move(fresh);
+            resolveJournal(*shadow, shadowQueue);
+            for(unsigned sample = 0; sample < elapsed; ++sample)
+            {
+                for(const auto& action : accepted)
+                    if(action.sample == sample) acceptAction(*shadow, shadowQueue, action);
+                shadowQueue.service(*shadow);
+                shadow->renderSample();
+            }
         }
         const auto shadowDrain = resolveJournal(*shadow, shadowQueue);
         if(live->cycles() != frozenCycles) throw std::runtime_error("private replay advanced original board");
@@ -696,7 +748,7 @@ static int testJournalReplay(const std::vector<uint8_t>& rom, const std::vector<
         std::cout << "journal-drain live=" << liveDrain << " shadow=" << shadowDrain
                   << " level-live=" << unsigned(liveImage[ramWord(*live,0xcf7c)+8])
                   << " level-shadow=" << unsigned(shadowImage[ramWord(*shadow,0xcf7c)+8]) << '\n';
-        if(scenario == 8) allEqual &= liveImage[levelAddress] == 80;
+        if(scenario == 8) allEqual &= liveImage[levelAddress] == 80 && (!exactClone || shadowImage[levelAddress] == 80);
         // Dump from fresh boards so the oracle cannot release an intentionally held key.
         auto nativeLive = settingsBoard(rom, waves, liveImage);
         auto nativeShadow = settingsBoard(rom, waves, shadowImage);
@@ -705,6 +757,95 @@ static int testJournalReplay(const std::vector<uint8_t>& rom, const std::vector<
         allEqual &= compare(referenceDump, candidateDump, "checkpoint-journal-replay");
     }
     return allEqual ? 0 : 1;
+}
+
+static void requireSameExecution(Sc88Pro& a, Sc88Pro& b)
+{
+    if(a.cycles() != b.cycles() || !Sc88ProSettingsProbe::sameCpu(a,b) ||
+       Sc88ProSettingsProbe::ram(a) != Sc88ProSettingsProbe::ram(b) ||
+       a.lcd().getDdRam() != b.lcd().getDdRam() || a.lcd().getCgRam() != b.lcd().getCgRam() ||
+       a.lcd().getContentGeneration() != b.lcd().getContentGeneration() ||
+       a.buttons() != b.buttons() || a.leds() != b.leds() ||
+       a.midiInBacklog() != b.midiInBacklog() || a.serialOut(0) != b.serialOut(0) ||
+       a.serialOut(1) != b.serialOut(1))
+        throw std::runtime_error("clone execution state differs");
+    std::vector<synthLib::SMidiEvent> x,y;
+    a.readMidiOut(x); b.readMidiOut(y);
+    if(x.size() != y.size()) throw std::runtime_error("clone MIDI event count differs");
+    for(size_t i=0; i<x.size(); ++i)
+        if(x[i].a != y[i].a || x[i].b != y[i].b || x[i].c != y[i].c || x[i].sysex != y[i].sysex)
+            throw std::runtime_error("clone MIDI bytes differ");
+}
+
+static int testExecutionClone(const std::vector<uint8_t>& rom, const std::vector<uint8_t>& waves)
+{
+    auto live = std::make_unique<Probe>(rom,waves);
+    run(*live, g_sampleRate*10);
+    // Same manual p93 nondefault distortion and CC16 routing as --efx-controller.
+    for(const auto& bytes : std::vector<std::vector<uint8_t>>{
+        {0xf0,0x41,0x10,0x42,0x12,0x40,0x41,0x22,1,0x5c,0xf7},
+        {0xf0,0x41,0x10,0x42,0x12,0x40,3,0,1,0x11,0x2b,0xf7},
+        {0xf0,0x41,0x10,0x42,0x12,0x40,3,3,0,0x3a,0xf7},
+        {0xf0,0x41,0x10,0x42,0x12,0x40,3,0x1b,0x10,0x12,0xf7},
+        {0xf0,0x41,0x10,0x42,0x12,0x40,3,0x1c,0x7f,0x22,0xf7}})
+    {
+        synthLib::SMidiEvent event(synthLib::MidiEventSource::Host);
+        event.sysex.assign(bytes.begin(),bytes.end());
+        live->addMidiEvent(event); run(*live,g_sampleRate/10);
+    }
+    midi(*live,0xb0,16,91); midi(*live,0xb0,64,127); midi(*live,0x90,60,100);
+    midi(*live,0x90,67,85);
+    bool heard=false;
+    for(unsigned frame=0; frame<g_sampleRate/10; ++frame)
+    {
+        const auto out=live->renderSample(); heard |= out.first != 0 || out.second != 0;
+    }
+    if(!heard) throw std::runtime_error("active clone fixture was silent");
+    unsigned notifications=0;
+    live->lcd().setChangeCallback([&] { ++notifications; });
+    for(unsigned phase=0; phase<12; ++phase)
+    {
+        // Each phase leaves new input, a key edge, and partial host-byte latches pending.
+        synthLib::SMidiEvent event(synthLib::MidiEventSource::Host);
+        event.a=0xb0; event.b=16; event.c=uint8_t(phase*7);
+        live->addMidiEvent(event);
+        live->setButtons(phase%2 ? 0 : uint32_t{1} << unsigned(Sc88ProButton::LevelR));
+        Sc88ProSettingsProbe::partialHostWrite(*live);
+        Sc88ProSettingsProbe::stageProgramChange(*live);
+        const auto copyStart=std::chrono::steady_clock::now();
+        auto clone=live->cloneExecution();
+        const auto copyEnd=std::chrono::steady_clock::now();
+        std::cout << "clone-copy-us=" << std::chrono::duration_cast<std::chrono::microseconds>(copyEnd-copyStart).count() << '\n';
+        if(!clone) throw std::runtime_error("execution clone rejected known board contexts");
+        requireSameExecution(*live,*clone);
+        const auto frozenRam=Sc88ProSettingsProbe::ram(*live);
+        const auto frozenCycles=live->cycles(), frozenGeneration=live->lcd().getContentGeneration();
+        const auto frozenNotifications=notifications;
+        Sc88ProSettingsProbe::finishHostWrite(*clone);
+        std::vector<Sc88Pro::SampleFrame> expected;
+        for(unsigned frame=0; frame<1024+phase; ++frame) expected.push_back(clone->renderSample());
+        if(frozenRam != Sc88ProSettingsProbe::ram(*live) || frozenCycles != live->cycles() ||
+           frozenGeneration != live->lcd().getContentGeneration() || frozenNotifications != notifications)
+            throw std::runtime_error("private clone mutated or notified its source");
+        auto hostWords=live->cloneExecution();
+        Sc88ProSettingsProbe::finishHostWrite(*live);
+        // Compare immediately: firmware/DSP execution may overwrite the addressed cells.
+        Sc88ProSettingsProbe::finishHostWrite(*hostWords);
+        if(!Sc88ProSettingsProbe::sameCommittedHostWords(*live,*hostWords))
+            throw std::runtime_error("clone partial host-byte commit differs");
+        for(const auto out : expected)
+            if(live->renderSample() != out) throw std::runtime_error("clone PCM continuation differs");
+        requireSameExecution(*live,*clone);
+    }
+    auto survivor=live->cloneExecution();
+    auto control=live->cloneExecution();
+    live.reset();
+    for(unsigned frame=0; frame<g_sampleRate; ++frame)
+        if(survivor->renderSample() != control->renderSample())
+            throw std::runtime_error("clone continuation after source destruction differs");
+    requireSameExecution(*survivor,*control);
+    std::cout << "execution-clone: active EFX PCM, CPU, SRAM, panel, MIDI, host latches, isolation and source destruction passed\n";
+    return 0;
 }
 
 static int runProbe(int argc, char** argv)
@@ -722,6 +863,9 @@ static int runProbe(int argc, char** argv)
         else if(option == "--idle-boundary") idleBoundaryFixture = true;
         else if(option == "--journal-replay") journalFixture = true;
         else if(option == "--journal-ordering") journalOrderingFixture = true;
+        else if(option == "--execution-clone") executionCloneFixture = true;
+        else if(option == "--clone-journal") cloneJournalFixture = true;
+        else if(option == "--clone-ordering") cloneOrderingFixture = true;
         else return 2;
     }
     baseLib::disableErrorDialogs();
@@ -741,6 +885,9 @@ static int runProbe(int argc, char** argv)
     run(source, 32000 * 10); screen(source, "booted");
     if(idleBoundaryFixture) return traceIdleBoundary(source);
     if(journalFixture) return testJournalReplay(rom, waves);
+    if(cloneJournalFixture) return testJournalReplay(rom, waves, false, true);
+    if(cloneOrderingFixture) return testJournalReplay(rom, waves, true, true);
+    if(executionCloneFixture) return testExecutionClone(rom, waves);
     if(journalOrderingFixture) return testJournalReplay(rom, waves, true);
     if(panelCloneFixture) return testPanelClone(rom, waves);
     if(panelBoundaryFixture)

@@ -243,6 +243,21 @@ namespace xpLib
 
 		XP();
 
+		// Fresh-instance execution copy. Preserve local ROM views and IRQ callback;
+		// Dsp's copy semantics retain independent compiled-code ownership (xp_dsp.cpp).
+		void copyRuntimeFrom(const XP& source)
+		{
+			m_state = source.m_state;
+			m_frame = source.m_frame;
+			m_frameVoices = source.m_frameVoices;
+			m_mixerSummary = source.m_mixerSummary;
+			m_hostWriteBytes = source.m_hostWriteBytes;
+			m_hostReadWord = source.m_hostReadWord;
+			m_hostReadAddress = source.m_hostReadAddress;
+			m_interruptLine = source.m_interruptLine;
+			m_irqEventAcceptedThisStep = source.m_irqEventAcceptedThisStep;
+		}
+
 		uint16_t hostRead(uint16_t _address);
 		void hostWrite(uint16_t _address, uint16_t _value);
 		uint8_t hostRead8(uint16_t _address);

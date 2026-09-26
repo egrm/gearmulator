@@ -24,6 +24,8 @@
 // table describes one chip (which sources exist, their vectors, IPR bits and
 // tie-break rank), so the same controller serves the H8/510 and H8/570.
 #pragma once
+#include <algorithm>
+#include <iterator>
 #include <array>
 
 #include "cpu/h8500/bus.hpp"
@@ -90,6 +92,18 @@ const IntcLayout& intc_layout_for(ChipModel model);
 
 class Intc final : public Device, public IrqAckSink {
  public:
+  // Copy stored execution data only; Machine retains destination wiring and copies events.
+  void copy_runtime_from(const Intc& source) {
+    req_ = source.req_;
+    latched_ = source.latched_;
+    nmi_pin_high_ = source.nmi_pin_high_;
+    nmicr_ = source.nmicr_;
+    irqcr_ = source.irqcr_;
+    std::copy(std::begin(source.irq_pin_low_), std::end(source.irq_pin_low_), std::begin(irq_pin_low_));
+    std::copy(std::begin(source.ipr_), std::end(source.ipr_), std::begin(ipr_));
+    std::copy(std::begin(source.dte_), std::end(source.dte_), std::begin(dte_));
+  }
+
   static constexpr u8 kVecNmi = Cpu::kVecNmi;
 
   Intc(Cpu& cpu, const IntcLayout& layout);

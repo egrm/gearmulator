@@ -80,6 +80,16 @@ class SliceCore : public CodeSink, public Clock {
   }
 
  protected:
+  // An execution clone is taken only between completed slices; never copy an in-flight stack.
+  void copy_runtime_from(const SliceCore& source) {
+    budget_ = source.budget_;
+    pending_ = source.pending_;
+    slice_len_ = source.slice_len_;
+    in_slice_ = source.in_slice_;
+    cut_ = source.cut_;
+    total_states_ = source.total_states_;
+  }
+
   void raise(u32 bit) {
     if (!pending_) budget_ -= kForce;
     pending_ |= bit;

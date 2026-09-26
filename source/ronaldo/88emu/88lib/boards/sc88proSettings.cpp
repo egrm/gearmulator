@@ -60,6 +60,36 @@ namespace emu88Lib
 		}
 	}
 
+	bool Sc88ProSettings::isCaptureBoundary(const Sc88Pro& board, const bool allowHeld)
+	{
+		if(!board.isValid() || board.m_firmwareHash != g_supportedFirmware || board.m_serialMidi ||
+		   board.m_machine.cpu().in_slice()) return false;
+		// Firmware 1.02 disassembly and executed boundary fixtures in
+		// docs/research/88emu-state-capture-design.md: empty dispatcher loop,
+		// interrupt nesting, scanned/stable matrix, and scanner/UI task sleep records.
+		constexpr std::array<uint32_t, 3> idlePc{0x065b, 0x065f, 0x0662};
+		constexpr size_t interruptNesting = 0xf82e, matrix = 0x466a, stableMatrix = 0x466e;
+		constexpr size_t panelWord = 0x4666, stablePanelWord = 0x4668, deferredKeys = 0x4696;
+		constexpr size_t uiTask = 0xf850, scannerTask = 0xf840;
+		constexpr uint8_t uiSleeping = 0x89, scannerSleeping = 0x81;
+		constexpr uint8_t uiWorkMask = 9, scannerWorkMask = 1, deferredMask = 1;
+		const auto& registers = board.m_machine.cpu().regs();
+		const auto pc = board.m_machine.cpu().code_addr(registers.pc);
+		const auto& ram = board.m_sram;
+		if(std::find(idlePc.begin(), idlePc.end(), pc) == idlePc.end() ||
+		   readWord(ram, interruptNesting) != uint16_t{} || board.midiInBacklog() != size_t{}) return false;
+		if(!allowHeld && board.m_buttons != uint32_t{}) return false;
+		for(size_t column{}; column < sizeof(board.m_buttons); ++column)
+			if(ram[matrix + column] != static_cast<uint8_t>(~(board.m_buttons >> (column * g_byteBits))) ||
+			   ram[stableMatrix + column] != ram[matrix + column]) return false;
+		if(!allowHeld)
+			for(size_t key{}; key < std::numeric_limits<decltype(board.m_buttons)>::digits; ++key)
+				if(ram[deferredKeys + key] & deferredMask) return false;
+		return readWord(ram, panelWord) == readWord(ram, stablePanelWord) &&
+		       ram[uiTask] == uiSleeping && !(ram[uiTask + sizeof(uint8_t)] & uiWorkMask) &&
+		       ram[scannerTask] == scannerSleeping && !(ram[scannerTask + sizeof(uint8_t)] & scannerWorkMask);
+	}
+
 	Sc88ProSettings::Result Sc88ProSettings::capture(const Sc88Pro& _board, std::vector<uint8_t>& _image)
 	{
 		if(!_board.isValid() || _board.m_firmwareHash != g_supportedFirmware)

@@ -12,6 +12,8 @@
 // modes 3/4 port 2 is the address bus and reads its latch.  The host supplies
 // pin levels with set_pins() and observes outputs through the write hook.
 #pragma once
+#include <algorithm>
+#include <iterator>
 #include <functional>
 
 #include "cpu/h8500/bus.hpp"
@@ -22,6 +24,11 @@ namespace h8500 {
 
 class Ports final : public Device {
  public:
+  // Copy stored execution data only; Machine retains destination wiring and copies events.
+  void copy_runtime_from(const Ports& source) {
+    std::copy(std::begin(source.p_), std::end(source.p_), std::begin(p_));
+  }
+
   // Called after a data-register write: port number 1..8, latch, direction.
   using WriteHook = std::function<void(unsigned port, u8 dr, u8 ddr)>;
   // Called on a data-register read with the value the port model computed, so
@@ -73,6 +80,15 @@ class Ports final : public Device {
 // are recorded but do not yet retime the bus (TODO(bus-controller)).
 class SysRegs final : public Device {
  public:
+  // Register storage has no callbacks; preserve the destination chip configuration.
+  void copy_runtime_from(const SysRegs& source) {
+    rfshcr_ = source.rfshcr_;
+    wcr_ = source.wcr_;
+    arbt_ = source.arbt_;
+    ar3t_ = source.ar3t_;
+    sbycr_ = source.sbycr_;
+    brcr_ = source.brcr_;
+  }
   explicit SysRegs(const ChipConfig& cfg) : cfg_(cfg) { reset(); }
   void map(emu::IoMux& mux);
   void reset();

@@ -96,6 +96,9 @@ class Cpu final : public emu::SliceCore {
   Cpu(Bus& bus, const ChipConfig& cfg);
   ~Cpu() override;
 
+  // At an instruction boundary, retaining this CPU's bus, IRQ sink and host hook.
+  bool copy_runtime_from(const Cpu& source);
+
   // Hardware reset: latch mode, SR.T=0, SR.I=7, load PC (and CP) from vector 0.
   void reset();
 

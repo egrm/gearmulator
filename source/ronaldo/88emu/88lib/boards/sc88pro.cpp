@@ -38,7 +38,7 @@ namespace emu88Lib
 	                 const bool _factoryReset)
 		: m_rom(std::move(_firmware))
 		, m_firmwareHash(m_rom)
-		, m_waveRom(decodeWaveRom(_waveRom))
+		, m_waveRom(std::make_shared<const std::vector<uint8_t>>(decodeWaveRom(_waveRom)))
 		, m_xp()
 		, m_subMcu([this](Sc88SubMcu::Record&& _r) { m_midiInQueue.emplace_back(std::move(_r)); },
 		           SmSysExStage, SmCommand - SmSysExStage)
@@ -50,19 +50,7 @@ namespace emu88Lib
 			return;
 		}
 
-		// Configure the existing xp core from the board: the Pro exposes
-		// five consecutive 4 MiB CS windows (A0/A1, B0/B1, C). Keep this
-		// product wiring here; xp itself remains product-agnostic.
-		constexpr size_t windowSize = 0x400000;
-		for(size_t cs = 0; cs < 5; ++cs)
-		{
-			const size_t offset = cs * windowSize;
-			if(offset >= m_waveRom.size())
-				break;
-			const size_t size = std::min(windowSize, m_waveRom.size() - offset);
-			m_xp.mapWaveRom(cs, m_waveRom.data() + offset, size,
-			                   xpLib::XP::PhysicalWaveRomWidth::bits16);
-		}
+		mapWaveRom();
 		// SDOB is the stereo LSP send. With the Pro's 0x3924=0x5040 and
 		// 0x3926=0x10d2 descriptors, SDOC and SDOD are the independent stereo
 		// OUT1 and OUT2 streams.
@@ -95,6 +83,84 @@ namespace emu88Lib
 		// sequence applies only to the hardware SC-88Pro path.
 		if(_factoryReset && !m_serialMidi)
 			runFactoryReset();
+	}
+
+	void Sc88Pro::mapWaveRom()
+	{
+		// Configure the existing xp core from the board: the Pro exposes
+		// five consecutive 4 MiB CS windows (A0/A1, B0/B1, C). Keep this
+		// product wiring here; xp itself remains product-agnostic.
+		constexpr size_t windowSize = 0x400000;
+		for(size_t cs = 0; cs < 5; ++cs)
+		{
+			const size_t offset = cs * windowSize;
+			if(offset >= m_waveRom->size())
+				break;
+			const size_t size = std::min(windowSize, m_waveRom->size() - offset);
+			m_xp.mapWaveRom(cs, m_waveRom->data() + offset, size,
+			                   xpLib::XP::PhysicalWaveRomWidth::bits16);
+		}
+	}
+
+	Sc88Pro::Sc88Pro(const Sc88Pro& source, ExecutionCloneTag)
+		: m_rom(source.m_rom), m_firmwareHash(source.m_firmwareHash), m_waveRom(source.m_waveRom)
+		, m_subMcu([this](Sc88SubMcu::Record&& record) { m_midiInQueue.emplace_back(std::move(record)); },
+		           SmSysExStage, SmCommand - SmSysExStage)
+		, m_lsp(source.m_lsp)
+	{
+		wireChip();
+		mapWaveRom();
+		m_xp.setInterruptCallback([this](bool level) { requestIrq(IrqXp, level); });
+		m_xp.copyRuntimeFrom(source.m_xp);
+		m_subMcu.copyRuntimeFrom(source.m_subMcu);
+		m_sram = source.m_sram;
+		m_lcd = source.m_lcd;
+		m_lcdEnabled = source.m_lcdEnabled;
+		m_valid = source.m_valid;
+		m_samplesRendered = source.m_samplesRendered;
+		m_cycleTarget = source.m_cycleTarget;
+		m_cycleFrac = source.m_cycleFrac;
+		m_buttons = source.m_buttons;
+		m_scanColumn = source.m_scanColumn;
+		m_gaInt = source.m_gaInt;
+		m_gaIrqMask = source.m_gaIrqMask;
+		m_gaIntTrigger = source.m_gaIntTrigger;
+		m_leds = source.m_leds;
+		m_ledControl = source.m_ledControl;
+		m_lcdInstr = source.m_lcdInstr;
+		m_lcdStaged = source.m_lcdStaged;
+		m_lcdBuffer = source.m_lcdBuffer;
+		m_gaLcdEvent = source.m_gaLcdEvent;
+		m_subMcuRam = source.m_subMcuRam;
+		m_subMcuStarted = source.m_subMcuStarted;
+		m_midiInQueue = source.m_midiInQueue;
+		m_midiMailbox = source.m_midiMailbox;
+		m_midiMailboxFull = source.m_midiMailboxFull;
+		m_midiWireDelay = source.m_midiWireDelay;
+		m_midiWireFrac = source.m_midiWireFrac;
+		m_lspEnabled = source.m_lspEnabled;
+		m_xpEnabled = source.m_xpEnabled;
+		m_p3dr = source.m_p3dr;
+		m_lspReturnEnabled = source.m_lspReturnEnabled;
+		m_serialMidi = source.m_serialMidi;
+		m_serialOut = source.m_serialOut;
+		// A private resolution must never notify observers of the live display.
+		m_lcd.setChangeCallback({});
+		m_lcd.setCgRamChangeCallback({});
+		m_lcd.setCursorChangeCallback({});
+	}
+
+	std::unique_ptr<Sc88Pro> Sc88Pro::cloneExecution() const
+	{
+		if(!m_valid || m_machine.cpu().in_slice()) return {};
+		auto result = std::unique_ptr<Sc88Pro>(new Sc88Pro(*this, ExecutionCloneTag{}));
+		if(!result->m_machine.copy_runtime_from_510(m_machine,
+			[this, &result](void* owner) -> std::optional<void*>
+			{
+				if(owner == this) return result.get();
+				return std::nullopt;
+			})) return {};
+		return result;
 	}
 
 	void Sc88Pro::powerCycle()

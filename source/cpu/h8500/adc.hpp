@@ -12,6 +12,8 @@
 // host through set_input() or a sampler callback evaluated when a conversion
 // completes.
 #pragma once
+#include <algorithm>
+#include <iterator>
 #include <functional>
 
 #include "cpu/h8500/bus.hpp"
@@ -23,6 +25,20 @@ namespace h8500 {
 
 class Adc final : public Device {
  public:
+  // Copy stored execution data only; Machine retains destination wiring and copies events.
+  void copy_runtime_from(const Adc& source) {
+    event_ = source.event_;
+    ch_mask_ = source.ch_mask_;
+    adcsr_ = source.adcsr_;
+    adcr_ = source.adcr_;
+    temp_ = source.temp_;
+    channel_ = source.channel_;
+    end_ = source.end_;
+    now_ = source.now_;
+    std::copy(std::begin(source.addr_), std::end(source.addr_), std::begin(addr_));
+    std::copy(std::begin(source.inputs_), std::end(source.inputs_), std::begin(inputs_));
+  }
+
   static constexpr u8 kAdf = 0x80, kAdie = 0x40, kAdst = 0x20, kScan = 0x10, kCks = 0x08;
   static constexpr u8 kTrge = 0x80;
   using Sampler = std::function<u16(unsigned channel)>;  // returns a 10-bit value

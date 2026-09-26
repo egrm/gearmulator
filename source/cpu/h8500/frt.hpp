@@ -28,6 +28,23 @@ namespace h8500 {
 
 class Frt final : public Device {
  public:
+  // Copy stored execution data only; Machine retains destination wiring and copies events.
+  void copy_runtime_from(const Frt& source) {
+    event_ = source.event_;
+    tcr_ = source.tcr_;
+    tcsr_ = source.tcsr_;
+    flags_read_ = source.flags_read_;
+    frc_ = source.frc_;
+    ocra_ = source.ocra_;
+    ocrb_ = source.ocrb_;
+    icr_ = source.icr_;
+    temp_ = source.temp_;
+    tick_ = source.tick_;
+    now_ = source.now_;
+    out_a_ = source.out_a_;
+    out_b_ = source.out_b_;
+  }
+
   // TCR bits
   static constexpr u8 kIcie = 0x80, kOcieb = 0x40, kOciea = 0x20, kOvie = 0x10, kOeb = 0x08, kOea = 0x04;
   // TCSR bits

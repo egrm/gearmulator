@@ -8,6 +8,7 @@
 #pragma once
 #include <algorithm>
 #include <memory>
+#include <optional>
 
 #include "cpu/h8500/adc.hpp"
 #include "cpu/h8500/bus.hpp"
@@ -143,6 +144,33 @@ class Machine final : public ResetSink {
   Ports570& ports570() { return ports570_; }
   SysRegs570& sysregs570() { return sysregs570_; }
   const ChipConfig& config() const { return cfg_; }
+
+  // H8/510 has no on-chip RAM (chip.cpp); the board copies external memory.
+  // Retain constructor-installed bus maps, peripheral references and host hooks.
+  // On failure the private destination must be discarded; source is untouched.
+  template<class Rebind>
+  bool copy_runtime_from_510(const Machine& source, Rebind&& boardRebind) {
+    if (cfg_.model != ChipModel::H8_510 || source.cfg_.model != cfg_.model ||
+        cfg_.mode != source.cfg_.mode || !cpu_.copy_runtime_from(source.cpu_)) return false;
+    intc_.copy_runtime_from(source.intc_);
+    for (size_t i{}; i < std::size(frt_); ++i) frt_[i].copy_runtime_from(source.frt_[i]);
+    tmr_.copy_runtime_from(source.tmr_);
+    wdt_.copy_runtime_from(source.wdt_);
+    for (size_t i{}; i < std::size(sci_); ++i) sci_[i].copy_runtime_from(source.sci_[i]);
+    adc_.copy_runtime_from(source.adc_);
+    ports_.copy_runtime_from(source.ports_);
+    sysregs_.copy_runtime_from(source.sysregs_);
+    dtc_.copy_runtime_from(source.dtc_);
+    resets_ = source.resets_;
+    return sched_.copy_pending_from(source.sched_, [&](void* owner) -> std::optional<void*> {
+      for (size_t i{}; i < std::size(frt_); ++i) if (owner == &source.frt_[i]) return &frt_[i];
+      for (size_t i{}; i < std::size(sci_); ++i) if (owner == &source.sci_[i]) return &sci_[i];
+      if (owner == &source.tmr_) return &tmr_;
+      if (owner == &source.wdt_) return &wdt_;
+      if (owner == &source.adc_) return &adc_;
+      return boardRebind(owner);
+    });
+  }
 
   // Current time in states (phi clock cycles).
   u64 now() const { return cpu_.total_states(); }

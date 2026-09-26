@@ -23,6 +23,20 @@ namespace h8500 {
 
 class Tmr final : public Device {
  public:
+  // Copy stored execution data only; Machine retains destination wiring and copies events.
+  void copy_runtime_from(const Tmr& source) {
+    event_ = source.event_;
+    tcr_ = source.tcr_;
+    tcsr_ = source.tcsr_;
+    flags_read_ = source.flags_read_;
+    tcora_ = source.tcora_;
+    tcorb_ = source.tcorb_;
+    tcnt_ = source.tcnt_;
+    tick_ = source.tick_;
+    now_ = source.now_;
+    out_ = source.out_;
+  }
+
   // TCR bits
   static constexpr u8 kCmieb = 0x80, kCmiea = 0x40, kOvie = 0x20;
   // TCSR bits

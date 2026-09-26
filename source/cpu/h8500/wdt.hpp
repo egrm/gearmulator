@@ -30,6 +30,17 @@ class ResetSink {
 
 class Wdt final : public Device {
  public:
+  // Copy stored execution data only; Machine retains destination wiring and copies events.
+  void copy_runtime_from(const Wdt& source) {
+    event_ = source.event_;
+    tcsr_ = source.tcsr_;
+    tcnt_ = source.tcnt_;
+    rstcsr_ = source.rstcsr_;
+    ovf_read_ = source.ovf_read_;
+    tick_ = source.tick_;
+    now_ = source.now_;
+  }
+
   static constexpr u8 kOvf = 0x80, kWtIt = 0x40, kTme = 0x20;
   static constexpr u8 kWrst = 0x80, kRstoe = 0x40;
 

@@ -32,6 +32,26 @@ namespace h8500 {
 
 class Sci final : public Device {
  public:
+  // Copy stored execution data only; Machine retains destination wiring and copies events.
+  void copy_runtime_from(const Sci& source) {
+    tx_event_ = source.tx_event_;
+    rx_event_ = source.rx_event_;
+    smr_ = source.smr_;
+    brr_ = source.brr_;
+    scr_ = source.scr_;
+    tdr_ = source.tdr_;
+    ssr_ = source.ssr_;
+    rdr_ = source.rdr_;
+    flags_read_ = source.flags_read_;
+    ext_bit_states_ = source.ext_bit_states_;
+    tsr_ = source.tsr_;
+    tsr_valid_ = source.tsr_valid_;
+    tx_end_ = source.tx_end_;
+    rx_queue_ = source.rx_queue_;
+    rx_end_ = source.rx_end_;
+    now_ = source.now_;
+  }
+
   // SMR bits
   static constexpr u8 kCa = 0x80, kChr = 0x40, kPe = 0x20, kOe = 0x10, kStop = 0x08;
   // SCR bits

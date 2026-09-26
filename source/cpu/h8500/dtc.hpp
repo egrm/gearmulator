@@ -19,6 +19,8 @@
 // instruction boundary by Machine::run (transfers never interleave with an
 // instruction).
 #pragma once
+#include <algorithm>
+#include <iterator>
 #include <functional>
 
 #include "cpu/h8500/bus.hpp"
@@ -29,6 +31,13 @@ namespace h8500 {
 
 class Dtc final : public DtcClient {
  public:
+  // Copy stored execution data only; Machine retains destination wiring and copies events.
+  void copy_runtime_from(const Dtc& source) {
+    pending_ = source.pending_;
+    transfers_ = source.transfers_;
+    std::copy(std::begin(source.vector_), std::end(source.vector_), std::begin(vector_));
+  }
+
   // Clears the module flag for a served interrupt; `data` is the transferred
   // value (SCI TXI uses it as the byte written to TDR).
   using FlagClear = std::function<void(u16 data)>;

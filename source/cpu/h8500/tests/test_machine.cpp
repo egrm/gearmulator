@@ -201,6 +201,84 @@ void test_event_slicing() {
   }
 }
 
+void test_runtime_copy_with_pending_peripherals() {
+  auto source = std::make_unique<Board>();
+  auto destination = std::make_unique<Board>();
+  source->poke(0x100, {0x00, 0x20, 0xfd}); // NOP; BRA -3, existing slicing fixture.
+  source->start(0x100);
+  // Pending receive/transmit frames plus timer compare and TEMP byte latch.
+  auto& bus = source->m.bus();
+  bus.write8(0xfec9, 0); // SCI BRR.
+  bus.write8(0xfeca, Sci::kTe | Sci::kRe | Sci::kRie);
+  source->m.sci(0).receive_byte(0x61);
+  source->m.sci(0).receive_byte(0x73);
+  bus.write8(0xfea4, 0x01);
+  bus.write8(0xfea5, 0x20);
+  bus.write8(0xfea0, Frt::kOciea);
+  bus.write8(0xfea2, 0x12); // High FRC byte staged in TEMP, not committed.
+  source->m.run(17);
+  source->m.intc().raise_cpu_interrupt(IrqSrc::Irq1);
+  // The board, rather than Machine, owns external RAM.
+  std::copy_n(bus.mem(), 0xfe80, destination->m.bus().mem());
+  const auto noBoardContexts=[](void*) -> std::optional<void*> { return std::nullopt; };
+  CHECK(destination->m.copy_runtime_from_510(source->m, noBoardContexts));
+  bus.write8(0xfea3, 0x34);
+  destination->m.bus().write8(0xfea3, 0x34);
+  std::vector<u8> sourceTx, destinationTx;
+  source->m.sci(0).set_tx_sink([&](u8 v,u64) { sourceTx.push_back(v); });
+  destination->m.sci(0).set_tx_sink([&](u8 v,u64) { destinationTx.push_back(v); });
+  for(unsigned step=0; step<1000; ++step) {
+    source->m.run(23); destination->m.run(23);
+    CHECK_EQ(source->m.now(),destination->m.now());
+    CHECK_EQ(source->m.cpu().regs().pc,destination->m.cpu().regs().pc);
+    CHECK_EQ(source->m.cpu().regs().sr,destination->m.cpu().regs().sr);
+    CHECK_EQ(source->m.sci(0).rx_pending(),destination->m.sci(0).rx_pending());
+    CHECK_EQ(source->m.frt(0).frc(source->m.now()),destination->m.frt(0).frc(destination->m.now()));
+    CHECK_EQ(source->m.sci(0).ssr(source->m.now()),destination->m.sci(0).ssr(destination->m.now()));
+  }
+  CHECK(sourceTx == destinationTx);
+  source.reset();
+  destination->m.run(1000); // All timer/SCI callback contexts must be destination-local.
+}
+
+void test_copy_pending_dtc_and_mask_deferral() {
+  const auto noBoardContexts=[](void*) -> std::optional<void*> { return std::nullopt; };
+  auto source=std::make_unique<Board>();
+  auto destination=std::make_unique<Board>();
+  // Same LDC unmask/NOP sequence as test_cpu.cpp's mask-delay regression.
+  source->poke(0x100,{0x0c,0x00,0x00,0x88,0x00,0x00,0x20,0xfc});
+  source->poke16(0x48,0x500);
+  source->poke(0x500,{0x00,0x20,0xfd});
+  source->start(0x100);
+  source->m.cpu().set_irq(2,0x24);
+  source->m.cpu().step(); // LDC completed; its mask change is still deferred.
+  std::copy_n(source->m.bus().mem(),0xfe80,destination->m.bus().mem());
+  CHECK(destination->m.copy_runtime_from_510(source->m,noBoardContexts));
+  for(unsigned instruction=0; instruction<8; ++instruction) {
+    CHECK_EQ(source->m.cpu().step(),destination->m.cpu().step());
+    CHECK_EQ(source->m.cpu().regs().pc,destination->m.cpu().regs().pc);
+    CHECK_EQ(source->m.cpu().exceptions_taken(),destination->m.cpu().exceptions_taken());
+    CHECK_EQ(source->m.now(),destination->m.now());
+  }
+  // Table layout is exercised through the published DTC implementation, with
+  // a queued transfer at the exact copy boundary and destination-owned flag hook.
+  source->poke16(Dtc::vector_addr(IrqSrc::Frt1Ocia),0x200);
+  source->poke16(0x200,0);
+  source->poke16(0x202,0x300);
+  source->poke16(0x204,0x400);
+  source->poke16(0x206,1);
+  source->poke(0x300,{0x5a});
+  CHECK(source->m.dtc().dtc_request(IrqSrc::Frt1Ocia,0x29));
+  std::copy_n(source->m.bus().mem(),0xfe80,destination->m.bus().mem());
+  CHECK(destination->m.copy_runtime_from_510(source->m,noBoardContexts));
+  source->m.dtc().service(); destination->m.dtc().service();
+  CHECK_EQ(source->m.bus().read8(0x400),0x5a);
+  CHECK_EQ(destination->m.bus().read8(0x400),0x5a);
+  CHECK_EQ(source->m.dtc().transfers(),destination->m.dtc().transfers());
+  CHECK_EQ(source->m.now(),destination->m.now());
+  CHECK(!source->m.dtc().pending() && !destination->m.dtc().pending());
+}
+
 }  // namespace
 
 int main() {
@@ -209,5 +287,7 @@ int main() {
   test_mmio_device();
   test_timed_interrupt();
   test_event_slicing();
+  test_runtime_copy_with_pending_peripherals();
+  test_copy_pending_dtc_and_mask_deferral();
   return test::finish("test_machine");
 }

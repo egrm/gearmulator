@@ -55,7 +55,18 @@ namespace lspLib
 				m_worker.join();
 		}
 
-		LSPDispatcher(const LSPDispatcher&) = delete;
+		// Runtime/program copies contain no owning pointers (lsp_common.h,
+		// lsp_program.h). The fresh dispatcher interprets until a later program
+		// edit requests its own compilation; source workers are never borrowed.
+		LSPDispatcher(const LSPDispatcher& source) : LSPDispatcher()
+		{
+			*m_runtime = *source.m_runtime;
+			*m_program = *source.m_program;
+			m_config = source.m_config;
+			m_running = source.m_running;
+			m_hostLatch = source.m_hostLatch;
+			m_hostReadAddr = source.m_hostReadAddr;
+		}
 		LSPDispatcher& operator=(const LSPDispatcher&) = delete;
 
 		void clear()

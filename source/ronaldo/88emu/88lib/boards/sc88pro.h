@@ -169,8 +169,13 @@ namespace emu88Lib
 		~Sc88Pro() = default;
 
 		bool isValid() const { return m_valid; }
+		const baseLib::MD5& firmwareHash() const { return m_firmwareHash; }
 
 		SampleFrame renderSample();
+
+		// Exclusive-owner use between completed native samples. No boot or time rebasing.
+		// Returns null if a scheduler context cannot be safely rebound.
+		std::unique_ptr<Sc88Pro> cloneExecution() const;
 
 		// MIDI in. Which path is used is decided from the ROM's own vector
 		// table: a board whose IRQ2 vector is the unused-vector stub has no
@@ -219,6 +224,9 @@ namespace emu88Lib
 	private:
 		friend class Sc88ProSettings;
 		friend struct Sc88ProSettingsProbe;
+		struct ExecutionCloneTag {};
+		Sc88Pro(const Sc88Pro& source, ExecutionCloneTag);
+		void mapWaveRom();
 		// Set up the bus map and the chip's host hooks. Runs once, from the
 		// constructor.
 		void    wireChip();
@@ -250,7 +258,8 @@ namespace emu88Lib
 		std::vector<uint8_t> m_rom;
 		const baseLib::MD5 m_firmwareHash;
 		std::vector<uint8_t> m_sram = std::vector<uint8_t>(SramSize, 0);
-		std::vector<uint8_t> m_waveRom;
+		// Decoded once and shared immutably; clone lifetime is independent of its source.
+		std::shared_ptr<const std::vector<uint8_t>> m_waveRom;
 
 		xpLib::XP m_xp;
 		Lcd m_lcd;
