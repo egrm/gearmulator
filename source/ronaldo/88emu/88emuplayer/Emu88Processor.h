@@ -128,7 +128,11 @@ namespace emu88Player
 		// The board to fall back to when the configured one is not available.
 		static std::optional<emu88Lib::DeviceModel> firstAvailableModel();
 
-		static std::unique_ptr<juce::PropertiesFile> createConfig(const std::string& _dataFolder);
+		static std::unique_ptr<juce::PropertiesFile> createConfig(const std::string& _dataFolder, bool _hosted = false);
+		bool isHosted() const
+		{
+			return wrapperType != wrapperType_Undefined && wrapperType != wrapperType_Standalone;
+		}
 
 	private:
 		synthLib::DeviceCreateParams createDeviceParams(emu88Lib::DeviceModel _model) const;

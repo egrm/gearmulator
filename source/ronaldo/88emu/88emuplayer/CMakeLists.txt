@@ -189,6 +189,14 @@ else()
 endif()
 endif() # Standalone application and CLI
 if(BUILD_TESTING)
+	add_executable(88emuHosted_test tests/Emu88Hosted_test.cpp)
+	target_link_libraries(88emuHosted_test PRIVATE 88emuplayer 88emuplayer_BinaryData 88lib
+		jucePlayerLib juceRmlUi juceUiLib jucePluginData juce_plugin_modules)
+	add_test(NAME 88emuHosted COMMAND 88emuHosted_test)
+	set_tests_properties(88emuHosted PROPERTIES
+		ENVIRONMENT "TUS_DATA_FOLDER=${CMAKE_CURRENT_BINARY_DIR}/hosted-test-data"
+		SKIP_RETURN_CODE 77)
+	set_property(TARGET 88emuHosted_test PROPERTY FOLDER "Ronaldo/tests")
 	add_executable(88emuLaunchOptions_test tests/Emu88LaunchOptions_test.cpp app/Emu88LaunchOptions.cpp app/Emu88Playlist.cpp)
 	target_link_libraries(88emuLaunchOptions_test PRIVATE 88lib jucePlayerLib)
 	add_test(NAME 88emuLaunchOptions COMMAND 88emuLaunchOptions_test)

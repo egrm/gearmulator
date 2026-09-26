@@ -19,6 +19,8 @@ namespace emu88Player
 		constexpr auto g_factoryResetOnLoadKey = "factoryResetOnLoad";
 		constexpr auto g_fastBootKey = "fastBoot";
 		constexpr auto g_pcmCardPathKey = "pcmCardPath";
+		// JUCE 7 PropertiesFile::Options: a negative delay disables automatic saving.
+		constexpr int g_noConfigAutoSaveMs = -1;
 
 	}
 
@@ -28,7 +30,7 @@ namespace emu88Player
 		  m_romFolder(standaloneLaunch && standaloneLaunch->has("rom-dir")
 			? launchFile(standaloneLaunch->get("rom-dir")).getFullPathName().toStdString()
 			: defaultDataFolder() + "roms/"),
-		  m_ownedConfig(standaloneConfig ? nullptr : createConfig(m_dataFolder)),
+		  m_ownedConfig(standaloneConfig ? nullptr : createConfig(m_dataFolder, isHosted())),
 		  m_config(standaloneConfig ? standaloneConfig : m_ownedConfig.get())
 	{
 		if(!standaloneLaunch || !standaloneLaunch->has("rom-dir"))
@@ -106,10 +108,10 @@ namespace emu88Player
 		                   std::memory_order_relaxed);
 
 		// Start the bridge only on backends that provide virtual endpoints.
-		const auto portMidiEnabled = jucePlayer::PortMidiBridge::virtualPortsSupported() &&
+		const auto portMidiEnabled = !isHosted() && jucePlayer::PortMidiBridge::virtualPortsSupported() &&
 			m_config->getBoolValue("portMidiEnabled", true);
 		m_portMidiEnabled.store(portMidiEnabled, std::memory_order_release);
-		if(jucePlayer::PortMidiBridge::virtualPortsSupported())
+		if(!isHosted() && jucePlayer::PortMidiBridge::virtualPortsSupported())
 		{
 			m_portMidiBridge = std::make_unique<jucePlayer::PortMidiBridge>([this](synthLib::SMidiEvent _event)
 			{
@@ -128,9 +130,13 @@ namespace emu88Player
 		m_portMidiBridge.reset();
 	}
 
-	std::unique_ptr<juce::PropertiesFile> Processor::createConfig(const std::string& _dataFolder)
+	std::unique_ptr<juce::PropertiesFile> Processor::createConfig(const std::string& _dataFolder, const bool _hosted)
 	{
 		juce::PropertiesFile::Options options;
+		// Read standalone defaults once, but let the host own changes to this instance.
+		// JUCE's doNotSave also prevents explicit saveIfNeeded() and destructor writes.
+		options.doNotSave = _hosted;
+		if(_hosted) options.millisecondsBeforeSaving = g_noConfigAutoSaveMs;
 		options.applicationName = "DSP56300Emulator_SC88Hardware";
 		options.filenameSuffix = ".settings";
 		options.folderName = "DSP56300Emulator_SC88Hardware";
@@ -467,7 +473,7 @@ namespace emu88Player
 
 	void Processor::setPortMidiEnabled(const bool _enabled)
 	{
-		if(!jucePlayer::PortMidiBridge::virtualPortsSupported())
+		if(isHosted() || !jucePlayer::PortMidiBridge::virtualPortsSupported())
 			return;
 		m_portMidiEnabled.store(_enabled, std::memory_order_release);
 		if(m_portMidiBridge)
