@@ -112,6 +112,18 @@ namespace hostRecallTest
 			"VST3 state includes the selected model's hardware settings");
 	}
 
+	inline void requirePowerOff(const MemoryBlock& state)
+	{
+		const auto component = componentStateFromHost(state);
+		auto envelope = parseXML(String::fromUTF8(static_cast<const char*>(component.getData()),
+			static_cast<int>(component.getSize())));
+		const auto* payload = envelope ? envelope->getChildByName("Payload") : nullptr;
+		require(payload != nullptr && !payload->getBoolAttribute("power") &&
+			payload->getChildByName("Hardware") != nullptr &&
+			payload->getStringAttribute("assets").isNotEmpty(),
+			"VST3 retains powered-off hardware settings and asset identity");
+	}
+
 	inline uint8_t sc88HardwareByte(const MemoryBlock& componentState, size_t address)
 	{
 		auto envelope = parseXML(String::fromUTF8(static_cast<const char*>(componentState.getData()),
@@ -192,6 +204,59 @@ namespace hostRecallTest
 		MidiBuffer notes;
 		notes.addEvent(MidiMessage::noteOn(1, 60, static_cast<uint8>(96)), 13);
 		return notes;
+	}
+
+	inline int runPowerOff(const PluginDescription& description, const String& componentPath,
+		const String& fixturePath, int expectedModel)
+	{
+		MemoryBlock component;
+		require(File(componentPath).loadFileAsData(component), "Read native powered-off component state");
+		XmlElement wrapper("VST3PluginState");
+		wrapper.createNewChildElement("IComponent")->addTextElement(component.toBase64Encoding());
+		MemoryBlock wrapped;
+		AudioProcessor::copyXmlToBinary(wrapper, wrapped);
+		AudioPluginFormatManager manager;
+		manager.addDefaultFormats();
+		auto source = create(manager, description);
+		source->setStateInformation(wrapped.getData(), static_cast<int>(wrapped.getSize()));
+		const auto initial = save(*source);
+		requireModel(initial, expectedModel);
+		requirePowerOff(initial);
+		const auto silent = render(*source, auditionNotes(), auditionBlocks);
+		require(std::all_of(silent.begin(), silent.end(), [](float sample) { return sample == 0.f; }),
+			"Powered-off VST3 ignores notes and renders silence");
+		const auto saved = save(*source);
+		requirePowerOff(saved);
+		source->releaseResources();
+		source.reset();
+		auto restored = create(manager, description);
+		restored->setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
+		require(save(*restored) == saved, "Powered-off VST3 restores before audio processing");
+		const auto reopened = render(*restored, auditionNotes(), auditionBlocks);
+		require(reopened == silent, "Powered-off VST3 stays silent after instance destruction");
+		restored->releaseResources();
+		require(File(fixturePath).replaceWithData(saved.getData(), saved.getSize()),
+			"Write powered-off cross-process state fixture");
+		return 0;
+	}
+
+	inline int readFreshPowerOff(const PluginDescription& description, const String& fixturePath,
+		int expectedModel)
+	{
+		MemoryBlock saved;
+		require(File(fixturePath).loadFileAsData(saved), "Read powered-off prior-process state");
+		requireModel(saved, expectedModel);
+		requirePowerOff(saved);
+		AudioPluginFormatManager manager;
+		manager.addDefaultFormats();
+		auto restored = create(manager, description);
+		restored->setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
+		require(save(*restored) == saved, "Fresh process preserves powered-off VST3 state");
+		const auto audio = render(*restored, auditionNotes(), auditionBlocks);
+		require(std::all_of(audio.begin(), audio.end(), [](float sample) { return sample == 0.f; }),
+			"Fresh process keeps powered-off VST3 silent");
+		restored->releaseResources();
+		return 0;
 	}
 
 	inline MidiMessage sc88MasterVolumeEdit()

@@ -191,6 +191,14 @@ else()
 endif()
 endif() # Standalone application and CLI
 if(BUILD_TESTING)
+	add_executable(88emuPowerRecall_test tests/Emu88PowerRecall_test.cpp)
+	target_link_libraries(88emuPowerRecall_test PRIVATE 88emuplayer 88emuplayer_BinaryData 88lib
+		jucePlayerLib juceRmlUi juceUiLib jucePluginData juce_plugin_modules)
+	add_test(NAME 88emuPowerRecall COMMAND 88emuPowerRecall_test)
+	set_tests_properties(88emuPowerRecall PROPERTIES
+		ENVIRONMENT "TUS_DATA_FOLDER=${CMAKE_CURRENT_BINARY_DIR}/power-recall-test-data"
+		SKIP_RETURN_CODE 77)
+	set_property(TARGET 88emuPowerRecall_test PROPERTY FOLDER "Ronaldo/tests")
 	add_executable(88emuRecall_test tests/Emu88Recall_test.cpp)
 	target_link_libraries(88emuRecall_test PRIVATE 88emuplayer 88emuplayer_BinaryData 88lib
 		jucePlayerLib juceRmlUi juceUiLib jucePluginData juce_plugin_modules)
@@ -219,6 +227,12 @@ if(BUILD_TESTING)
 	target_link_libraries(88emuLaunchOptions_test PRIVATE 88lib jucePlayerLib)
 	add_test(NAME 88emuLaunchOptions COMMAND 88emuLaunchOptions_test)
 	set_property(TARGET 88emuLaunchOptions_test PROPERTY FOLDER "Ronaldo/tests")
+	if(TARGET 88emuplayer_VST3)
+		# One dependency graph builds shared player code once for the host and
+		# processor acceptance executables, instead of separate target invocations.
+		add_custom_target(88emuRecall_build DEPENDS 88emuplayer_VST3 pluginTester
+			88emuRecall_test 88emuPowerRecall_test)
+	endif()
 endif()
 
 # Numeric argument validation must retain NaN/Inf checks in Release.

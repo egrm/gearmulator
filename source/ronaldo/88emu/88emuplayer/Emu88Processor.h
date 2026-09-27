@@ -8,6 +8,7 @@
 #include "jucePlayerLib/portMidiBridge.h"
 
 #include "88lib/hardwareDevice.h"
+#include "88lib/settingsChunk.h"
 
 #include "synthLib/plugin.h"
 #include "synthLib/resampler.h"
@@ -146,6 +147,7 @@ namespace emu88Player
 		std::mutex m_stateTransaction;
 		juce::MemoryBlock m_loadedState;
 		std::unique_ptr<juce::XmlElement> m_stateEnvelope;
+		std::optional<emu88Lib::SettingsChunk> m_dormantSettings;
 		std::string m_stateDiagnostic;
 		bool m_unavailableState = false;
 		bool m_loadedStateUnchanged = false;
@@ -159,6 +161,8 @@ namespace emu88Player
 		std::atomic<bool> m_dirtyNotification{false};
 		std::atomic<uint64_t> m_restoredStateRevision{0};
 		synthLib::DeviceCreateParams createDeviceParams(emu88Lib::DeviceModel _model) const;
+		void captureStateInformation(juce::MemoryBlock& destination);
+		bool restoreDormantPower();
 		bool replaceDevice(emu88Lib::DeviceModel _model, bool _persistModel, uint32_t heldButtons = 0);
 		uint8_t midiPortCount() const;
 		void sendSystemExclusive(const std::vector<uint8_t>& _bytes);

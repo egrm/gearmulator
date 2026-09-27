@@ -309,8 +309,55 @@ namespace emu88Player
 		}
 		if(enabled && unavailable) return restartDevice();
 		if(!unavailable && enabled == isPoweredOn()) return !enabled || hasValidRom();
-		if(enabled) return replaceDevice(m_deviceModel, false, heldButtons);
+		if(enabled)
+		{
+			if(!bootOptions().factoryReset && !heldButtons)
+			{
+				const juce::ScopedLock lock(getCallbackLock());
+				if(m_dormantSettings)
+				{
+					const juce::ScopedUnlock unlocked(getCallbackLock());
+					return restoreDormantPower();
+				}
+			}
+			return replaceDevice(m_deviceModel, false, heldButtons);
+		}
 
+		const auto previouslySuspended = isSuspended();
+		suspendProcessing(true);
+		std::lock_guard transaction(m_stateTransaction);
+		juce::MemoryBlock retained;
+		std::unique_ptr<juce::XmlElement> payload;
+		std::optional<emu88Lib::SettingsChunk> dormant;
+		juce::String assets;
+		try
+		{
+			// Suspend hosted processing and serialize panel edits with the state
+			// transaction before taking the final image; failure leaves power on.
+			captureStateInformation(retained);
+			auto envelope = juce::parseXML(juce::String::fromUTF8(
+				static_cast<const char*>(retained.getData()), static_cast<int>(retained.getSize())));
+			const auto* capturedPayload = envelope ? envelope->getChildByName("Payload") : nullptr;
+			if(!capturedPayload)
+				throw std::runtime_error("Cannot retain hardware before power-off");
+			payload = std::make_unique<juce::XmlElement>(*capturedPayload);
+			const auto* hardware = payload->getChildByName("Hardware");
+			juce::MemoryBlock bytes;
+			if(!hardware || !bytes.fromBase64Encoding(hardware->getAllSubText()))
+				throw std::runtime_error("Power-off capture contains no hardware settings");
+			dormant = emu88Lib::SettingsChunk::decode(bytes.getData(), bytes.getSize());
+			assets = payload->getStringAttribute("assets");
+			if(!dormant || !emu88Lib::HardwareDevice::supportsSettingsImage(*dormant) || assets.isEmpty() ||
+			   dormant->model != m_deviceModel)
+				throw std::runtime_error("Power-off capture has unsupported hardware settings");
+		}
+		catch(const std::exception& error)
+		{
+			const juce::ScopedLock lock(getCallbackLock());
+			m_stateDiagnostic = error.what();
+			suspendProcessing(previouslySuspended);
+			return false;
+		}
 		std::unique_ptr<emu88Lib::HardwareDevice> previousDevice;
 		std::unique_ptr<synthLib::Plugin> previousEngine;
 		{
@@ -320,16 +367,20 @@ namespace emu88Player
 			m_midiPlayer.processBlock(discarded, 1, std::max(1.0, getSampleRate()), false);
 			previousEngine = std::move(m_engine);
 			previousDevice = std::move(m_device);
+			m_dormantSettings = std::move(dormant);
+			m_stateEnvelope = std::move(payload);
 			m_unavailableState = false;
 			notifyStateChanged();
 		}
 		previousEngine.reset();
 		previousDevice.reset();
+		suspendProcessing(previouslySuspended);
 		return true;
 	}
 
 	bool Processor::replaceDevice(const emu88Lib::DeviceModel _model, const bool _persistModel, const uint32_t heldButtons)
 	{
+		std::lock_guard transaction(m_stateTransaction);
 		if(!emu88Lib::isDeviceModelValue(static_cast<uint32_t>(_model)))
 			return false;
 
@@ -361,6 +412,7 @@ namespace emu88Player
 			previousDevice = std::move(m_device);
 			m_device = std::move(replacementDevice);
 			m_engine = std::move(replacementEngine);
+			m_dormantSettings.reset();
 			m_deviceModel = _model;
 			m_unavailableState = false;
 			notifyStateChanged();
@@ -385,6 +437,7 @@ namespace emu88Player
 
 	void Processor::sendMidiEvents(const std::vector<synthLib::SMidiEvent>& _events)
 	{
+		std::lock_guard transaction(m_stateTransaction);
 		const juce::ScopedLock lock(getCallbackLock());
 		if(!m_engine || !m_device || !m_device->isValid())
 			return;

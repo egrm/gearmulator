@@ -118,6 +118,11 @@ int main(const int _argc, char* _argv[])
 			return error("Failed to find plugin " + pluginPathName);
 
 		const auto recallModel = cmdLine.getInt("recall-model", -1);
+		if (cmdLine.contains("recall-power-off") && cmdLine.contains("recall-read"))
+			return hostRecallTest::readFreshPowerOff(desc, cmdLine.get("recall-read"), recallModel);
+		if (cmdLine.contains("recall-power-off"))
+			return hostRecallTest::runPowerOff(desc, cmdLine.get("recall-component"),
+				cmdLine.get("recall-write"), recallModel);
 		if (cmdLine.contains("recall-read"))
 			return hostRecallTest::readFreshProcess(desc, cmdLine.get("recall-read"), recallModel,
 				cmdLine.get("recall-component"));

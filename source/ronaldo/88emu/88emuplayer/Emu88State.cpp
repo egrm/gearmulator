@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <chrono>
+#include <limits>
 #include <stdexcept>
 
 namespace emu88Player
@@ -91,18 +92,21 @@ namespace emu88Player
 
     void Processor::setPanelButtons(const uint32_t buttons)
     {
+        std::lock_guard transaction(m_stateTransaction);
         const juce::ScopedLock lock(getCallbackLock());
         if(m_device) { m_device->setPanelButtons(buttons); notifyStateChanged(); }
     }
 
     void Processor::turnPanelEncoder(const int32_t detents)
     {
+        std::lock_guard transaction(m_stateTransaction);
         const juce::ScopedLock lock(getCallbackLock());
         if(m_device) { m_device->turnPanelEncoder(detents); notifyStateChanged(); }
     }
 
     void Processor::clickPanelButton(const uint32_t pressed, const uint32_t released)
     {
+        std::lock_guard transaction(m_stateTransaction);
         const juce::ScopedLock lock(getCallbackLock());
         if(m_device) { m_device->clickPanelButton(pressed, released); notifyStateChanged(); }
     }
@@ -117,6 +121,11 @@ namespace emu88Player
     void Processor::getStateInformation(juce::MemoryBlock& destination)
     {
         std::lock_guard transaction(m_stateTransaction);
+        captureStateInformation(destination);
+    }
+
+    void Processor::captureStateInformation(juce::MemoryBlock& destination)
+    {
         try
         {
             std::unique_ptr<emu88Lib::HardwareDevice> board;
@@ -189,7 +198,8 @@ namespace emu88Player
                     engine = m_engine->cloneForCapture(board.get());
                     payload->setAttribute("assets", assetIdentity(m_device->assetDigests()));
                 }
-                else if(!m_unavailableState) payload->deleteAllChildElementsWithTagName("Hardware");
+                else if(!m_unavailableState && !m_dormantSettings)
+                    payload->deleteAllChildElementsWithTagName("Hardware");
                 break;
             }
             replaceChild(*payload, "Player", playerSnapshot.toXml());
@@ -281,23 +291,28 @@ namespace emu88Player
             std::unique_ptr<synthLib::Plugin> engine;
             const bool power = payload->getBoolAttribute("power");
             bool unavailable = false;
-            if(power)
+            std::optional<emu88Lib::SettingsChunk> dormantSettings;
+            const auto dormantAssets = payload->getStringAttribute("assets");
+            const auto* hardware = payload->getChildByName("Hardware");
+            if(power || hardware)
             {
-                const auto* hardware = payload->getChildByName("Hardware");
                 juce::MemoryBlock hardwareBytes;
                 if(!hardware || !hardwareBytes.fromBase64Encoding(hardware->getAllSubText()))
                     throw std::runtime_error("Invalid hardware state");
-                const auto settings = emu88Lib::SettingsChunk::decode(hardwareBytes.getData(), hardwareBytes.getSize());
-                if(!settings || static_cast<int>(settings->model) != model)
+                dormantSettings = emu88Lib::SettingsChunk::decode(hardwareBytes.getData(), hardwareBytes.getSize());
+                if(!dormantSettings || static_cast<int>(dormantSettings->model) != model)
                     throw std::runtime_error("Hardware identity mismatch");
-                if(!emu88Lib::HardwareDevice::supportsSettingsImage(*settings))
+                if(!emu88Lib::HardwareDevice::supportsSettingsImage(*dormantSettings))
                     throw std::runtime_error("Required model/firmware adapter is unsupported");
+                if(dormantAssets.isEmpty()) throw std::runtime_error("Missing asset manifest");
+            }
+            if(power)
+            {
                 emu88Lib::BootOptions boot;
                 boot.factoryReset = false;
                 boot.fastBoot = false;
-                device = std::make_unique<emu88Lib::HardwareDevice>(createDeviceParams(settings->model), boot, candidateCard, &*settings);
-                if(payload->getStringAttribute("assets").isEmpty()) throw std::runtime_error("Missing asset manifest");
-                unavailable = device->assetDigests().empty() || payload->getStringAttribute("assets") != assetIdentity(device->assetDigests());
+                device = std::make_unique<emu88Lib::HardwareDevice>(createDeviceParams(dormantSettings->model), boot, candidateCard, &*dormantSettings);
+                unavailable = device->assetDigests().empty() || dormantAssets != assetIdentity(device->assetDigests());
                 if(!unavailable && !device->isValid()) throw std::runtime_error("Firmware adapter rejected the hardware image");
                 if(unavailable) device.reset();
                 else
@@ -355,6 +370,7 @@ namespace emu88Player
                 oldDevice = std::move(m_device);
                 m_device = std::move(device);
                 m_engine = std::move(engine);
+                m_dormantSettings = power ? std::optional<emu88Lib::SettingsChunk>{} : std::move(dormantSettings);
                 m_deviceModel = static_cast<emu88Lib::DeviceModel>(model);
                 exchangeProperties(*m_config, candidateConfig);
                 m_pcmCard = std::move(candidateCard);
@@ -390,6 +406,40 @@ namespace emu88Player
             m_stateDiagnostic = error.what();
             m_lastStateSucceeded.store(false);
             throw;
+        }
+    }
+
+    bool Processor::restoreDormantPower()
+    {
+        try
+        {
+            // Reuse the validated host restore path. Only the supply state
+            // changes; the retained hardware image and asset identity do not.
+            juce::MemoryBlock offState;
+            getStateInformation(offState);
+            auto envelope = juce::parseXML(juce::String::fromUTF8(
+                static_cast<const char*>(offState.getData()), static_cast<int>(offState.getSize())));
+            const auto* offPayload = envelope ? envelope->getChildByName("Payload") : nullptr;
+            if(!offPayload || offPayload->getBoolAttribute("power") ||
+               !offPayload->getChildByName("Hardware")) return false;
+            auto powered = std::make_unique<juce::XmlElement>(*offPayload);
+            powered->setAttribute("power", true);
+            juce::XmlElement candidate("Emu88State");
+            candidate.setAttribute("version", hostStateVersion);
+            candidate.setAttribute("checksum", digest(canonical(*powered)));
+            candidate.addChildElement(powered.release());
+            const auto text = canonical(candidate);
+            const auto byteCount = text.getNumBytesAsUTF8();
+            if(byteCount > static_cast<size_t>(std::numeric_limits<int>::max()))
+                throw std::runtime_error("Retained power state exceeds the host state size limit");
+            setStateInformation(text.toRawUTF8(), static_cast<int>(byteCount));
+            return hasValidRom();
+        }
+        catch(const std::exception& error)
+        {
+            const juce::ScopedLock lock(getCallbackLock());
+            m_stateDiagnostic = error.what();
+            return false;
         }
     }
 }
