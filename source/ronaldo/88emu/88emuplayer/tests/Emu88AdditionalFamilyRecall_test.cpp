@@ -171,6 +171,79 @@ namespace
             .replaceWithData(wet.getData(), wet.getSize()));
     }
 
+    void runLaMidiProducer(emu88Lib::DeviceModel model, const std::string& name)
+    {
+        // The real-ROM laBoard_test probes part-one PC17 on MIDI channel 2
+        // and system reverb level through DT1 on all three supported boards.
+        juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
+        emu88Player::Processor source;
+        CHECK(source.setDeviceModel(model));
+        CHECK(source.hasValidRom());
+        source.setRateAndBufferSizeDetails(sampleRate, blockSize);
+        source.prepareToPlay(sampleRate, blockSize);
+        source.config().setValue("audioSetup", "host-owned-routing-marker");
+        source.config().setValue("portMidiEnabled", true);
+        render(source, static_cast<int>(sampleRate * 10));
+        const auto before = hardware(save(source));
+        CHECK(before.model == model);
+        CHECK(before.layout == emu88Lib::LaSettings::LayoutVersion);
+        CHECK(before.memory.size() == emu88Lib::LaSettings::ImageBytes);
+
+        juce::MidiBuffer programEdit;
+        programEdit.addEvent(juce::MidiMessage::programChange(2, 17), 11);
+        render(source, blockSize, programEdit);
+        render(source, static_cast<int>(sampleRate));
+        const auto selected = save(source);
+        const auto selectedHardware = hardware(selected);
+        CHECK(selectedHardware.model == model);
+        CHECK(selectedHardware.memory.size() == emu88Lib::LaSettings::ImageBytes);
+        CHECK(selectedHardware.memory[emu88Lib::LaSettings::PatchHeadOffset] !=
+                  before.memory[emu88Lib::LaSettings::PatchHeadOffset] ||
+              selectedHardware.memory[emu88Lib::LaSettings::PatchHeadOffset + 1] !=
+                  before.memory[emu88Lib::LaSettings::PatchHeadOffset + 1]);
+
+        const auto saveWithReverb = [&](uint8_t level)
+        {
+            juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
+            emu88Player::Processor edited;
+            edited.setStateInformation(selected.getData(), static_cast<int>(selected.getSize()));
+            CHECK(edited.lastStateOperationSucceeded());
+            edited.setRateAndBufferSizeDetails(sampleRate, blockSize);
+            edited.prepareToPlay(sampleRate, blockSize);
+            juce::MidiBuffer reverbEdit;
+            reverbEdit.addEvent(mt32ReverbLevel(level), 11);
+            render(edited, blockSize, reverbEdit);
+            render(edited, static_cast<int>(sampleRate));
+            const auto state = save(edited);
+            const auto image = hardware(state);
+            CHECK(image.model == model);
+            CHECK(image.layout == emu88Lib::LaSettings::LayoutVersion);
+            CHECK(image.memory.size() == emu88Lib::LaSettings::ImageBytes);
+            CHECK_EQ(image.memory[emu88Lib::LaSettings::SystemOffset + 3], level);
+            CHECK_EQ(image.memory[emu88Lib::LaSettings::PatchHeadOffset],
+                     selectedHardware.memory[emu88Lib::LaSettings::PatchHeadOffset]);
+            CHECK_EQ(image.memory[emu88Lib::LaSettings::PatchHeadOffset + 1],
+                     selectedHardware.memory[emu88Lib::LaSettings::PatchHeadOffset + 1]);
+            return state;
+        };
+        const auto dry = saveWithReverb(0);
+        const auto wet = saveWithReverb(1);
+        const auto dryHardware = hardware(dry);
+        const auto wetHardware = hardware(wet);
+        for(size_t index = 0; index < emu88Lib::LaSettings::ImageBytes; ++index)
+            if(index != emu88Lib::LaSettings::SystemOffset + 3)
+                CHECK_EQ(dryHardware.memory[index], wetHardware.memory[index]);
+
+        const auto data = juce::File(emu88Player::defaultDataFolder());
+        const auto modelNumber = static_cast<int>(model);
+        CHECK(data.getChildFile("additional-family-" + juce::String(name.c_str()) + "-dry-model-" +
+                                juce::String(modelNumber) + ".component")
+            .replaceWithData(dry.getData(), dry.getSize()));
+        CHECK(data.getChildFile("additional-family-" + juce::String(name.c_str()) + "-wet-model-" +
+                                juce::String(modelNumber) + ".component")
+            .replaceWithData(wet.getData(), wet.getSize()));
+    }
+
     void runMt32PanelProbe()
     {
         // Roland MT-32 Owner's Manual, Timbre Setup p.20: PART 1,
@@ -245,6 +318,8 @@ int main(int argc, char** argv)
     if(!std::getenv("TUS_DATA_FOLDER") || !std::getenv("TUS_TEST_ROM_DIR")) return 77;
     if(argc != 2 || (std::string{argv[1]} != "--sc55-mk1" &&
                      std::string{argv[1]} != "--mt32-old" &&
+                     std::string{argv[1]} != "--mt32-new" &&
+                     std::string{argv[1]} != "--cm32l" &&
                      std::string{argv[1]} != "--mt32-panel-probe"))
         throw std::invalid_argument("No supported additional-family producer fixture for this model");
     baseLib::disableErrorDialogs();
@@ -263,6 +338,14 @@ int main(int argc, char** argv)
         runMt32OldProducer();
         emu88Player::standaloneLaunch = nullptr;
         return test::finish("88emuMt32OldProducerRecall");
+    }
+    if(std::string{argv[1]} == "--mt32-new" || std::string{argv[1]} == "--cm32l")
+    {
+        const bool isMt32New = std::string{argv[1]} == "--mt32-new";
+        runLaMidiProducer(isMt32New ? emu88Lib::DeviceModel::Mt32New :
+            emu88Lib::DeviceModel::Cm32l, isMt32New ? "mt32new" : "cm32l");
+        emu88Player::standaloneLaunch = nullptr;
+        return test::finish("88emuLaMidiProducerRecall");
     }
     juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
     emu88Player::Processor source;

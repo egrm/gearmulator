@@ -394,6 +394,18 @@ namespace hostRecallTest
 	inline constexpr size_t mt32ChunkDigestBytes = 16;
 	inline constexpr size_t mt32ReverbLevelOffset = 3;
 
+	inline bool isLaModel(int model)
+	{
+		return model == 18 || model == 21 || model == 22;
+	}
+
+	inline bool isLaProducerSeed(const String& seedKind)
+	{
+		return seedKind == "producer-mt32old-dry" || seedKind == "producer-mt32old-wet" ||
+			seedKind == "producer-mt32new-dry" || seedKind == "producer-mt32new-wet" ||
+			seedKind == "producer-cm32l-dry" || seedKind == "producer-cm32l-wet";
+	}
+
 	inline MemoryBlock mt32HardwareChunk(const MemoryBlock& component)
 	{
 		auto envelope = parseXML(String::fromUTF8(
@@ -426,20 +438,21 @@ namespace hostRecallTest
 					description);
 			return;
 		}
-		if(model == 21 && (seedKind == "producer-mt32old-dry" ||
-		                    seedKind == "producer-mt32old-wet"))
+		if(isLaModel(model) && isLaProducerSeed(seedKind))
 		{
 			// LaSettings.h layout 1: system 4, patch head 7, patch tail 2,
-			// timbre temp 246, physical knob 2. Native panel probe selected
-			// patch group 0 / timbre 63; DT1 sets system reverb level 0 or 1.
+			// timbre temp 246, physical knob 2. The old-model native
+			// panel probe selects Sitar; new and CM fixtures use part-one PC17.
 			constexpr size_t patchGroup = 4;
 			constexpr size_t patchTimbre = 5;
 			const auto sourceChunk = mt32HardwareChunk(seed);
 			const auto actualChunk = mt32HardwareChunk(actual);
 			const auto* sourceMemory = static_cast<const uint8_t*>(sourceChunk.getData()) + mt32ChunkMemoryOffset;
-			require(sourceMemory[patchGroup] == 0 && sourceMemory[patchTimbre] == 63 &&
-				sourceMemory[mt32ReverbLevelOffset] == (seedKind == "producer-mt32old-dry" ? 0 : 1),
-				"Native MT-32 producer seed selects Sitar and requested reverb level");
+			if(model == 21)
+				require(sourceMemory[patchGroup] == 0 && sourceMemory[patchTimbre] == 63,
+					"Native MT-32 old producer seed selects Sitar");
+			require(sourceMemory[mt32ReverbLevelOffset] == (seedKind.endsWith("dry") ? 0 : 1),
+				"LA producer seed retains requested reverb level");
 			require(actualChunk == sourceChunk, description);
 			return;
 		}
@@ -462,7 +475,7 @@ namespace hostRecallTest
 	{
 		// deviceModel.h::firstMidiChannel: LA part one receives on MIDI
 		// channel two. JUCE MidiMessage channels are one-based.
-		return model == 21 ? 2 : 1;
+		return isLaModel(model) ? 2 : 1;
 	}
 
 	inline MidiBuffer auditionNotes(int model = -1)
@@ -576,7 +589,7 @@ namespace hostRecallTest
 				requireProPanelContext(componentStateFromHost(save(*restored)), nativeComponent,
 					"Fresh process retains the native Pro Fine Tune menu context");
 		}
-		if(nativeComponentPath.isNotEmpty() && (expectedModel == 5 || expectedModel == 21))
+		if(nativeComponentPath.isNotEmpty() && (expectedModel == 5 || isLaModel(expectedModel)))
 		{
 			MemoryBlock nativeComponent;
 			require(File(nativeComponentPath).loadFileAsData(nativeComponent),
@@ -652,7 +665,7 @@ namespace hostRecallTest
 					requireProPanelContext(componentStateFromHost(saved), nativeComponent,
 						"Native Pro Fine Tune menu survives a fresh VST3 capture");
 			}
-			if(expectedModel == 5 || expectedModel == 21)
+			if(expectedModel == 5 || isLaModel(expectedModel))
 				requireAdditionalFamilySeed(componentStateFromHost(saved), nativeComponent,
 					expectedModel, seedKind, "Additional-family sound edits survive VST3 capture");
 		}
@@ -771,7 +784,7 @@ namespace hostRecallTest
 				requireProPanelContext(componentStateFromHost(save(*restored)), nativeComponent,
 					"Fresh VST3 instance restores the native Pro Fine Tune menu context");
 		}
-		if(nativeComponentPath.isNotEmpty() && (expectedModel == 5 || expectedModel == 21))
+		if(nativeComponentPath.isNotEmpty() && (expectedModel == 5 || isLaModel(expectedModel)))
 			requireAdditionalFamilySeed(componentStateFromHost(save(*restored)), nativeComponent,
 				expectedModel, seedKind, "Fresh VST3 instance restores additional-family sound edits");
 		auto duplicate = create(manager, description);
@@ -794,14 +807,13 @@ namespace hostRecallTest
 		require(firstAudio != defaultAudio, "Restored settings audibly differ from factory defaults");
 		if(seedKind == "producer-wet" || seedKind == "producer-dry" ||
 			seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry" ||
-			seedKind == "producer-mt32old-wet" || seedKind == "producer-mt32old-dry")
+			isLaProducerSeed(seedKind))
 		{
 			const auto otherKind = seedKind.replace("wet", "dry") == seedKind ?
 				seedKind.replace("dry", "wet") : seedKind.replace("wet", "dry");
-			const auto otherPath = expectedModel == 21 ?
-				nativeComponentPath.replace(
-					String("mt32old-") + (seedKind.endsWith("dry") ? "dry" : "wet") + "-model-",
-					String("mt32old-") + (seedKind.endsWith("dry") ? "wet" : "dry") + "-model-") :
+			const auto otherPath = isLaModel(expectedModel) ?
+				nativeComponentPath.replace(seedKind.endsWith("dry") ? "-dry-model-" : "-wet-model-",
+					seedKind.endsWith("dry") ? "-wet-model-" : "-dry-model-") :
 				nativeComponentPath.replace(seedKind, otherKind);
 			MemoryBlock otherNative;
 			require(otherPath != nativeComponentPath && File(otherPath).loadFileAsData(otherNative),
@@ -815,7 +827,7 @@ namespace hostRecallTest
 			(void)render(*otherSource, {}, 1);
 			const auto otherState = save(*otherSource);
 			requireModel(otherState, expectedModel);
-			if(expectedModel == 21)
+			if(isLaModel(expectedModel))
 				requireAdditionalFamilySeed(componentStateFromHost(otherState), otherNative,
 					expectedModel, otherKind, "Paired MT-32 sound survives VST3 capture");
 			else if(expectedModel == 2)
@@ -826,7 +838,7 @@ namespace hostRecallTest
 					expectedModel, otherKind, "Paired producer sound survives VST3 capture");
 			const auto thisComponent = componentStateFromHost(saved);
 			const auto otherComponent = componentStateFromHost(otherState);
-			if(expectedModel == 21)
+			if(isLaModel(expectedModel))
 			{
 				const auto thisChunk = mt32HardwareChunk(thisComponent);
 				const auto otherChunk = mt32HardwareChunk(otherComponent);
@@ -878,7 +890,7 @@ namespace hostRecallTest
 			for(size_t sample{}; sample < thisTail.size(); ++sample)
 				maximumDelta = std::max(maximumDelta, std::abs(thisTail[sample] - otherTail[sample]));
 			Logger::writeToLog("Producer wet/dry post-note tail maximum delta=" + String(maximumDelta, 9));
-			require(maximumDelta > 0.f, expectedModel == 21 ?
+			require(maximumDelta > 0.f, isLaModel(expectedModel) ?
 				"MT-32 system reverb level changes actual VST3 note-off tail" :
 				"Native reverb send zero changes actual VST3 note-off tail");
 			thisSound->releaseResources();
@@ -887,7 +899,7 @@ namespace hostRecallTest
 		}
 		const auto beforeIndependentEdit = save(*duplicate);
 		MidiBuffer independentEdit;
-		if(expectedModel == 21)
+		if(isLaModel(expectedModel))
 			independentEdit.addEvent(MidiMessage::programChange(hostMidiChannel(expectedModel), 18), 0);
 		else
 			independentEdit.addEvent(MidiMessage::controllerEvent(hostMidiChannel(expectedModel), 7, 0), 0);

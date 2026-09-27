@@ -126,7 +126,9 @@ int main(const int _argc, char* _argv[])
 			recallSeed == "producer-pro-wet" || recallSeed == "producer-pro-dry" ||
 			recallSeed == "producer-pro-bank";
 		const bool additionalFamilySeed = (recallSeed == "producer-sc55mk1" && recallModel == 5) ||
-			((recallSeed == "producer-mt32old-dry" || recallSeed == "producer-mt32old-wet") && recallModel == 21);
+			((recallSeed == "producer-mt32old-dry" || recallSeed == "producer-mt32old-wet") && recallModel == 21) ||
+			((recallSeed == "producer-mt32new-dry" || recallSeed == "producer-mt32new-wet") && recallModel == 22) ||
+			((recallSeed == "producer-cm32l-dry" || recallSeed == "producer-cm32l-wet") && recallModel == 18);
 		if(!recallSeed.empty() && (!cmdLine.contains("recall-component") ||
 			!(sc88Seed && (recallModel == 0 || recallModel == 1)) &&
 			!(proSeed && recallModel == 2) && !additionalFamilySeed))
