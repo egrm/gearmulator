@@ -52,6 +52,14 @@ namespace emu88Lib
 		constexpr size_t g_sc88SwitchBase = 0xe59e;
 		constexpr size_t g_sc88vlSwitchBase = 0xe5b2;
 		constexpr uint8_t g_switchMask = 0xe0;
+		// PartR writers SC 01:C81F and VL 01:BF6F use a 0..31 UI index;
+		// native initialization resets it (SC 01:D38A, VL 07:C605).
+		constexpr size_t g_sc88SelectedIndex = 0x56f2;
+		constexpr size_t g_sc88vlSelectedIndex = 0x56fc;
+		// Match the native panel gesture timing used by the Pro adapter and
+		// Sc88::runFactoryReset, allowing the scanner to consume each edge.
+		constexpr unsigned g_panelPressSamples = g_sampleRate / 10;
+		constexpr unsigned g_panelReleaseSamples = g_sampleRate / 4;
 		constexpr size_t g_partStride = sizeof(uint16_t); // R3 is doubled part index.
 		constexpr auto g_byteBits = std::numeric_limits<uint8_t>::digits;
 		// SC-88 handlers 30EC..326E and VL 31BD..333F. Controller values are
@@ -101,6 +109,9 @@ namespace emu88Lib
 		const auto accumulator = board.m_model == Model::Sc88 ? g_sc88Accumulator : g_sc88vlAccumulator;
 		const auto voiceOwner = board.m_model == Model::Sc88 ? g_sc88VoiceOwnerStart : g_sc88vlVoiceOwnerStart;
 		const auto switches = board.m_model == Model::Sc88 ? g_sc88SwitchBase : g_sc88vlSwitchBase;
+		const auto selectedIndex = board.m_model == Model::Sc88 ? g_sc88SelectedIndex : g_sc88vlSelectedIndex;
+		const auto savedSelection = readWord(image,selectedIndex);
+		if(savedSelection >= g_parts) return Result::InvalidImage;
 		std::array<uint8_t,g_meterCount> freshMeters{};
 		std::array<uint8_t,g_accumulatorBytes> freshAccumulator{};
 		std::array<uint8_t,g_voiceOwnerCount> freshVoiceOwners{};
@@ -117,6 +128,16 @@ namespace emu88Lib
 		for(unsigned sample{}; sample < g_bootSamples; ++sample) board.renderSample();
 		if(board.m_sram[g_bootGate] != g_preserveSettings) return Result::InvalidImage;
 		board.m_sram[g_batteryPreference] = image[g_batteryPreference];
+		// Let firmware rebuild the selected part's descriptors and LCD rather
+		// than transplanting UI pointers into a fresh machine.
+		for(size_t move{};move<g_parts && readWord(board.m_sram,selectedIndex)!=savedSelection;++move)
+		{
+			board.setButton(Button::PartR,true);
+			for(unsigned sample{};sample<g_panelPressSamples;++sample) board.renderSample();
+			board.setButtons(uint32_t{});
+			for(unsigned sample{};sample<g_panelReleaseSamples;++sample) board.renderSample();
+		}
+		if(readWord(board.m_sram,selectedIndex)!=savedSelection) return Result::InvalidImage;
 		std::copy_n(image.begin()+g_polyPressureBase,g_parts*g_polyPressureKeys,
 		            board.m_sram.begin()+g_polyPressureBase);
 		// The boot routines still reset receive controllers with C092 set.

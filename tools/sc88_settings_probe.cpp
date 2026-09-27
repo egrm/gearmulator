@@ -1,6 +1,7 @@
 // Diagnostic only: distinguish battery boot policy from project settings recall.
 // Real SC-88 and SC-88VL ROMs/waves are supplied by an explicit ROM directory.
 #include "88lib/boards/sc88.h"
+#include "88lib/boards/sc88Settings.h"
 #include "88lib/rom/romloader.h"
 #include "baseLib/os.h"
 
@@ -477,6 +478,144 @@ void tracePanelCandidate(Sc88& board, Model model)
     stable(*repeatedBoard,secondLevel,g_partLevelOffset,"second-level-stability");
 }
 
+bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
+                      const std::vector<uint8_t>& waves, Model model)
+{
+    // SC PartR C81F..C83C edits 56F2 and D2ED derives 56F0 from 07:A66E.
+    // VL PartR BF6F..BF8C edits 56FC and CA56 derives 56FA from 07:C3EE.
+    const auto indexAddress=model==Model::Sc88?size_t{0x56f2}:size_t{0x56fc};
+    const auto partAddress=model==Model::Sc88?size_t{0x56f0}:size_t{0x56fa};
+    const auto word=[](const std::vector<uint8_t>& ram, size_t address)
+    { return static_cast<uint16_t>((uint16_t{ram.at(address)}<<8)|ram.at(address+1)); };
+    const auto visible=[](const Sc88& board)
+    {
+        const auto& lcd=board.lcd();
+        std::string text(lcd.getVisibleColumns()*lcd.getVisibleLines(),' ');
+        lcd.copyVisibleDdRam(text.data());
+        return text;
+    };
+    const auto printable=[](std::string text)
+    {
+        for(auto& cell:text)
+            if(static_cast<unsigned char>(cell)<32 || static_cast<unsigned char>(cell)>126)
+                cell='.';
+        return text;
+    };
+    const auto wait=[&](Sc88& board, const char* phase)
+    {
+        for(unsigned elapsed{};elapsed<g_sampleRate;++elapsed)
+        {
+            if(panelCandidate(board,model))
+            {
+                std::cout << "panel-recall-candidate model=" << static_cast<int>(model)
+                          << " phase=" << phase << " samples=" << elapsed << '\n';
+                return true;
+            }
+            board.renderSample();
+        }
+        std::cerr << "panel-recall-candidate model=" << static_cast<int>(model)
+                  << " phase=" << phase << " did-not-settle\n";
+        return false;
+    };
+    const auto press=[&](Sc88& board, Button button, const char* phase)
+    {
+        board.setButton(button,true);
+        require(!panelCandidate(board,model),"candidate accepted new panel press");
+        run(board,g_sampleRate/10); // Existing native panel gesture interval.
+        board.setButtons(0);
+        return wait(board,phase);
+    };
+    const auto changedLevels=[](const std::vector<uint8_t>& before,
+                                const std::vector<uint8_t>& after)
+    {
+        std::vector<size_t> parts;
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto base=(part<g_groupPartCount?size_t{0x8088}:size_t{0x9588})+
+                            (part%g_groupPartCount)*g_partRecordBytes;
+            if(before.at(base+g_partLevelOffset)!=after.at(base+g_partLevelOffset))
+                parts.push_back(part);
+        }
+        return parts;
+    };
+    bool passed=true;
+    const auto check=[&](bool condition, const char* name, uint8_t preference)
+    {
+        if(!condition)
+            std::cerr << "FAIL panel-recall model=" << static_cast<int>(model)
+                      << " C072=" << unsigned(preference) << " check=" << name << '\n';
+        passed &= condition;
+    };
+    require(wait(live,"initial-A1"),"source A1 panel did not settle");
+    auto sourceA1=live.cloneExecution();
+    auto sourceA2=live.cloneExecution();
+    require(sourceA1 && sourceA2,"panel source clones unavailable");
+    require(press(*sourceA2,Button::PartR,"source-A2"),"source A2 panel did not settle");
+    std::array<std::vector<uint8_t>,2> images;
+    std::array<std::string,2> sourceLcd;
+    std::array<std::vector<size_t>,2> sourceTargets;
+    for(size_t selection{};selection<2;++selection)
+    {
+        auto& source=selection==0?*sourceA1:*sourceA2;
+        sourceLcd[selection]=visible(source);
+        require(Sc88Settings::capture(source,images[selection])==Sc88Settings::Result::Success &&
+                images[selection].size()==Sc88::SramSize,"source panel image capture failed");
+        const auto before=Sc88ExecutionProbe::ram(source);
+        std::cout << "panel-recall-source model=" << static_cast<int>(model)
+                  << " selection=" << selection
+                  << " index=" << word(before,indexAddress)
+                  << " part=" << word(before,partAddress)
+                  << " lcd=" << printable(sourceLcd[selection]) << '\n';
+        check(word(before,indexAddress)==selection &&
+              word(before,partAddress)==selection+1,
+              "native selected index/part disagrees with ROM mapping",0);
+        require(press(source,Button::LevelR,"source-next-LevelR"),
+                "source LevelR panel did not settle");
+        sourceTargets[selection]=changedLevels(before,Sc88ExecutionProbe::ram(source));
+        check(sourceTargets[selection]==std::vector<size_t>{selection+1},
+              "native next LevelR target disagrees with selected part",0);
+    }
+    for(uint8_t preference : {uint8_t{0},uint8_t{1}})
+        for(size_t selection{};selection<2;++selection)
+        {
+            auto variant=images[selection];
+            variant[g_batteryPreference]=preference; // Test-only preference variant.
+            auto restored=std::make_unique<Sc88>(rom,waves,model,false);
+            const auto result=Sc88Settings::restore(*restored,variant);
+            check(result==Sc88Settings::Result::Success,"fresh panel restore",preference);
+            if(result!=Sc88Settings::Result::Success) continue;
+            const auto before=Sc88ExecutionProbe::ram(*restored);
+            const auto restoredLcd=visible(*restored);
+            std::cout << "panel-recall-restored model=" << static_cast<int>(model)
+                      << " C072=" << unsigned(preference)
+                      << " selection=" << selection
+                      << " index=" << word(before,indexAddress)
+                      << " part=" << word(before,partAddress)
+                      << " lcd=" << printable(restoredLcd) << '\n';
+            check(before[g_batteryPreference]==preference,
+                  "saved C072 preference changed",preference);
+            check(word(before,indexAddress)==word(variant,indexAddress) &&
+                  word(before,partAddress)==word(variant,partAddress),
+                  "selected SRAM index/part lost",preference);
+            check(restoredLcd==sourceLcd[selection],
+                  "selected LCD context lost",preference);
+            const auto ready=wait(*restored,"restored-before-LevelR");
+            check(ready,"restored panel candidate did not settle",preference);
+            if(!ready) continue;
+            const auto editReady=press(*restored,Button::LevelR,"restored-next-LevelR");
+            check(editReady,"restored LevelR candidate did not settle",preference);
+            if(!editReady) continue;
+            const auto target=changedLevels(before,Sc88ExecutionProbe::ram(*restored));
+            std::cout << "panel-recall-target model=" << static_cast<int>(model)
+                      << " C072=" << unsigned(preference)
+                      << " selection=" << selection << " parts=";
+            for(const auto part:target) std::cout << part << ',';
+            std::cout << '\n';
+            check(target==sourceTargets[selection],"next LevelR target lost",preference);
+        }
+    return passed;
+}
+
 bool exercise(Model model, std::string_view mode)
 {
     auto romAsset = RomLoader::findROM(model);
@@ -498,6 +637,8 @@ bool exercise(Model model, std::string_view mode)
         tracePanelCandidate(*live,model);
         return true;
     }
+    if(mode=="--panel-recall")
+        return tracePanelRecall(*live,rom,waves,model);
     if(mode=="--idle-pc")
     {
         std::map<uint32_t,size_t> frequency;
@@ -545,7 +686,8 @@ int main(int argc, char** argv)
     baseLib::disableErrorDialogs();
     if(argc<2 || argc>3) return 77;
     const std::string_view mode=argc==3?argv[2]:"";
-    if(!mode.empty() && mode!="--idle-pc" && mode!="--panel-boundary") return 77;
+    if(!mode.empty() && mode!="--idle-pc" && mode!="--panel-boundary" &&
+       mode!="--panel-recall") return 77;
     synthLib::RomLoader::setSearchPath(argv[1]);
     try
     {
