@@ -137,6 +137,8 @@ namespace la32Lib
 		void setPcmRom(const uint8_t* _data, size_t _size);
 		void setRomAddressXor(uint32_t _mask);
 		void setIrqCallback(IrqCallback _callback);
+		// Runtime-only copy; keep the destination's PCM image and IRQ connection.
+		bool copyRuntimeFrom(const LA32& source);
 
 		uint8_t read(uint32_t _offset) const;
 		void write(uint32_t _offset, uint8_t _data);

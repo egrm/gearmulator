@@ -2,6 +2,7 @@
 #include "common/test_util.hpp"
 
 #include <algorithm>
+#include <memory>
 
 namespace
 {
@@ -298,6 +299,39 @@ int main()
 				CHECK_EQ(word, 0);
 			const auto silent = board.analogSample() == std::pair<float, float>{};
 			CHECK(silent);
+		}
+	}
+
+	// A private capture board must keep pending MIDI wire timing and CPU state while
+	// retaining its own UART, chip IRQ, and scheduler callback destinations.
+	{
+		Program p;
+		p.emit({0xb1, 0x5a, 0x30});					// sentinel until a serial byte arrives
+		p.emit({0xb0, 0x11, 0x20, 0x36, 0x20, 0xfa});	// wait for RI in SP_STAT
+		p.emit({0xb0, 0x07, 0x30});					// read SBUF
+		p.finish();
+		for(const auto model : {LaModel::Mt32Old, LaModel::Mt32New, LaModel::Cm32l})
+		{
+			auto source = std::make_unique<LaBoard>(romSet(p, model));
+			source->setKnob(300);
+			source->addMidiEvent(synthLib::SMidiEvent(synthLib::MidiEventSource::Host, 0x90, 60, 100));
+			auto clone = source->cloneExecution();
+			CHECK(clone && clone->isValid());
+			if(!clone) continue;
+			CHECK_EQ(clone->knob(), source->knob());
+			for(unsigned sample = 0; sample < 200; ++sample)
+			{
+				CHECK(clone->renderSample() == source->renderSample());
+				CHECK_EQ(clone->registerByte(0x30), source->registerByte(0x30));
+				CHECK(clone->dacBuses() == source->dacBuses());
+			}
+			CHECK_EQ(clone->registerByte(0x30), 0x90);
+			auto second = source->cloneExecution();
+			CHECK(second && second->isValid());
+			if(!second) continue;
+			source.reset();
+			for(unsigned sample = 0; sample < 200; ++sample)
+				CHECK(clone->renderSample() == second->renderSample());
 		}
 	}
 

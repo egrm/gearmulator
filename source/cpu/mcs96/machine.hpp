@@ -4,6 +4,7 @@
 // bounded by the next scheduled event.
 #pragma once
 #include <algorithm>
+#include <optional>
 
 #include "common/sched.hpp"
 #include "cpu/mcs96/bus.hpp"
@@ -39,6 +40,19 @@ class Machine final : public ResetSink {
   // The KB's watchdog overflow: same as a reset for everything on chip.
   void watchdog_reset() override { reset(); }
   u64 resets() const { return resets_; }
+
+  // Copy a stopped MCS-96 into an independently wired machine. All scheduler
+  // events on this chip are owned by its peripheral block; reject any unknown
+  // callback owner rather than retaining a source-machine pointer.
+  bool copy_runtime_from(const Machine& source) {
+    if (variant() != source.variant() || !cpu_.copy_runtime_from(source.cpu_)) return false;
+    periph_.copy_runtime_from(source.periph_);
+    resets_ = source.resets_;
+    return sched_.copy_pending_from(source.sched_, [&](void* owner) -> std::optional<void*> {
+      if (owner == &source.periph_) return &periph_;
+      return {};
+    });
+  }
 
   // Advance the machine by at least `states`, honouring every scheduled
   // event.  Returns the number of states actually elapsed.

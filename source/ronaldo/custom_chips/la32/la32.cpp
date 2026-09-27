@@ -155,6 +155,25 @@ void LA32::setIrqCallback(IrqCallback _callback)
 	m_irqCallback = std::move(_callback);
 }
 
+bool LA32::copyRuntimeFrom(const LA32& source)
+{
+	if(m_pcmRom != source.m_pcmRom) return false;
+	m_romAddressXor = source.m_romAddressXor;
+	m_voices = source.m_voices;
+	m_modulation = source.m_modulation;
+	m_config = source.m_config;
+	m_cycle = source.m_cycle;
+	m_lowByteLatch = source.m_lowByteLatch;
+	m_inactiveHistory = source.m_inactiveHistory;
+	m_prevOutput = source.m_prevOutput;
+	m_groupMod = source.m_groupMod;
+	m_summing = source.m_summing;
+	m_finished = source.m_finished;
+	m_irqPending = source.m_irqPending;
+	m_irqStatus = source.m_irqStatus;
+	return true;
+}
+
 uint8_t LA32::readPcm(const uint32_t _address) const
 {
 	if (m_pcmRom.empty())

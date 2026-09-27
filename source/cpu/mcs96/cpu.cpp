@@ -27,6 +27,22 @@ Cpu::Cpu(Bus& bus, Variant variant) : bus_(bus), variant_(variant), cells_(16, b
 
 Cpu::~Cpu() { bus_.set_code_sink(nullptr); }
 
+bool Cpu::copy_runtime_from(const Cpu& source) {
+  if (in_slice() || source.in_slice() || variant_ != source.variant_) return false;
+  SliceCore::copy_runtime_from(source);
+  regs_ = source.regs_;
+  std::memcpy(ram_, source.ram_, sizeof ram_);
+  holdoff_ = source.holdoff_;
+  idle_ = source.idle_;
+  power_down_ = source.power_down_;
+  illegal_count_ = source.illegal_count_;
+  // The old decode pages contain pointers into the old bus and host functions.
+  invalidate_all();
+  page_cells_ = nullptr;
+  page_pc_ = kNoPage;
+  return true;
+}
+
 void Cpu::reset_architectural_state() {
   regs_ = Regs{};
   // The complete register file, including the general register RAM and the

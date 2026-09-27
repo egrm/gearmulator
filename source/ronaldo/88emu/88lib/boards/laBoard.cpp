@@ -40,6 +40,7 @@ namespace emu88Lib
 
 	LaBoard::LaBoard(const LaRomSet& roms)
 		: m_model(roms.model), m_cpuStateRate(emu88Lib::cpuStateRate(roms.model)),
+		  m_romAssets(roms.isValid() ? std::make_shared<const LaRomSet>(roms) : nullptr),
 		  m_control(roms.isValid() ? roms.control : std::vector<uint8_t>{}), m_machine(cpuVariant(roms.model)),
 		  m_reverb(roms.reverb), m_ramHigh(0x4000, 0)
 	{
@@ -325,5 +326,36 @@ namespace emu88Lib
 	void LaBoard::transportDiscontinuity(const uint32_t generation)
 	{
 		if(m_midiIn) m_midiIn->transportDiscontinuity(generation);
+	}
+
+	std::unique_ptr<LaBoard> LaBoard::cloneExecution() const
+	{
+		if(!m_valid || !m_romAssets || m_machine.cpu().in_slice()) return {};
+		auto clone = std::make_unique<LaBoard>(*m_romAssets);
+		if(!clone->m_valid) return {};
+		clone->m_bank = m_bank;
+		clone->m_machine.cpu().select_code_bank(0x8000, 0x4000, m_bank);
+		if(!clone->m_machine.copy_runtime_from(m_machine) ||
+		   !clone->m_la32.copyRuntimeFrom(m_la32) ||
+		   !clone->m_reverb.copyRuntimeFrom(m_reverb)) return {};
+		std::memcpy(clone->directRam(), directRam(), DirectRamSize);
+		clone->m_ramHigh = m_ramHigh;
+		clone->m_lcd = m_lcd;
+		clone->m_lcd.setChangeCallback({});
+		clone->m_lcdBuffer = m_lcdBuffer;
+		clone->m_midiIn->copyStateFrom(*m_midiIn);
+		clone->m_midiOut = m_midiOut;
+		clone->m_buttons = m_buttons;
+		clone->m_dac = m_dac;
+		clone->m_controlLatch = m_controlLatch;
+		clone->m_reverbTime = m_reverbTime;
+		clone->m_reverbLevel = m_reverbLevel;
+		clone->m_port0 = m_port0;
+		clone->m_knob = m_knob;
+		clone->m_cpuRemainder = m_cpuRemainder;
+		clone->m_vcaControl = m_vcaControl;
+		clone->m_vcaGain = m_vcaGain;
+		clone->m_analogSample = m_analogSample;
+		return clone;
 	}
 }

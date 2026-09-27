@@ -43,6 +43,8 @@ namespace mt32ReverbLib
 		bool isValid() const { return m_rom.size() == 0x4000 || m_rom.size() == 0x8000; }
 		void reset();
 		void setParameters(unsigned _mode, unsigned _time, unsigned _level);
+		// Retain the destination's ROM and compiled program ownership.
+		bool copyRuntimeFrom(const Mt32Reverb& source);
 		std::pair<int32_t, int32_t> renderFrame(std::pair<int32_t, int32_t> _input);
 
 		// True while the selected program runs as compiled code rather than through the interpreter.

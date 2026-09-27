@@ -108,6 +108,9 @@ namespace emu88Lib
 		void addMidiEvent(const synthLib::SMidiEvent& event, uint8_t port = 0);
 		void readMidiOut(std::vector<synthLib::SMidiEvent>& events);
 		void transportDiscontinuity(uint32_t generation);
+		// Private, independent continuation for firmware-side settings queries.
+		// Caller must own the board exclusively between completed renderSample calls.
+		std::unique_ptr<LaBoard> cloneExecution() const;
 
 		// What the two board generations do to a 16-bit audio word on its way from the LA32
 		// to the reverb and the DAC; public so the tests can pin them down.
@@ -148,6 +151,8 @@ namespace emu88Lib
 
 		const LaModel m_model;
 		const uint32_t m_cpuStateRate;
+		// Immutable source images retained so a private board can wire its own chips.
+		std::shared_ptr<const LaRomSet> m_romAssets;
 		// The control ROM is the only image the board itself keeps: the LA32 and the reverb
 		// own theirs, so nothing holds a second copy of the PCM image.
 		std::vector<uint8_t> m_control;

@@ -66,6 +66,15 @@ namespace mt32ReverbLib
 		selectProgram();
 	}
 
+	bool Mt32Reverb::copyRuntimeFrom(const Mt32Reverb& source)
+	{
+		if(m_rom != source.m_rom) return false;
+		m_state = source.m_state;
+		m_romBase = source.m_romBase;
+		selectProgram();
+		return true;
+	}
+
 	void Mt32Reverb::selectProgram()
 	{
 		m_run = m_jit ? m_jit->program(m_romBase / ProgramBytes) : nullptr;

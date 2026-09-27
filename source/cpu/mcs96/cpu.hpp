@@ -65,6 +65,9 @@ class Cpu final : public emu::SliceCore {
 
   // Hardware reset: PC = 2080h, PSW = 0, register RAM all ones, SFRs reset.
   void reset();
+  // Transfer architectural execution state at an instruction boundary. Cached
+  // decoded cells remain local to the destination bus.
+  bool copy_runtime_from(const Cpu& source);
 
   unsigned step();
   u64 run(u64 states);

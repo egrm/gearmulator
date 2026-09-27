@@ -42,6 +42,10 @@ class Peripherals final : public SfrBlock {
   Peripherals(emu::Scheduler& sched, Cpu& cpu);
   ~Peripherals() override;
 
+  // Copy only hardware runtime state. The scheduler, CPU, reset sink and
+  // board-facing hooks remain bound to the destination machine.
+  void copy_runtime_from(const Peripherals& source);
+
   void set_reset_sink(ResetSink* s) { reset_sink_ = s; }
 
   // --- SfrBlock ---------------------------------------------------------------
