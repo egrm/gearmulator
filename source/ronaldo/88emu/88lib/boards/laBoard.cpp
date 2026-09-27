@@ -9,6 +9,61 @@ namespace emu88Lib
 {
 	namespace
 	{
+		// Roland MT-32 Owner's Manual, MIDI Implementation §§3, 5: SysEx
+		// framing, 21-bit (three seven-bit digits) parameter addresses, RQ1/DT1.
+		// https://dosdays.co.uk/media/midi/rolandmt-32ownersmanual.pdf
+		constexpr uint8_t g_sysexStart = 0xf0, g_sysexEnd = 0xf7;
+		constexpr uint8_t g_rolandId = 0x41, g_mt32ModelId = 0x16;
+		constexpr uint8_t g_defaultUnitId = 0x10;
+		constexpr uint8_t g_requestData = 0x11, g_dataSet = 0x12;
+		constexpr uint8_t g_midiDataMask = 0x7f;
+		constexpr unsigned g_midiAddressBits = 7;
+		constexpr unsigned g_midiAddressDigits = 3;
+		constexpr uint32_t g_midiAddressLimit = uint32_t{1} << (g_midiAddressBits * g_midiAddressDigits);
+		constexpr size_t g_sysexHeaderBytes = 5;
+		constexpr size_t g_parameterAddressIndex = g_sysexHeaderBytes;
+		constexpr size_t g_parameterDataIndex = g_parameterAddressIndex + g_midiAddressDigits;
+		constexpr size_t g_sysexTrailerBytes = 2;
+		constexpr size_t g_minDataSetBytes = g_parameterDataIndex + g_sysexTrailerBytes;
+
+		uint32_t decodeAddress(const synthLib::SysexBuffer& bytes, const size_t begin)
+		{
+			uint32_t value = 0;
+			for(unsigned digit = 0; digit < g_midiAddressDigits; ++digit)
+				value = (value << g_midiAddressBits) | bytes[begin + digit];
+			return value;
+		}
+
+		void appendAddress(synthLib::SysexBuffer& bytes, const uint32_t address)
+		{
+			for(unsigned digit = g_midiAddressDigits; digit != 0; --digit)
+				bytes.push_back(static_cast<uint8_t>((address >> ((digit - 1) * g_midiAddressBits)) & g_midiDataMask));
+		}
+
+		uint8_t checksum(const synthLib::SysexBuffer& bytes)
+		{
+			uint32_t sum = 0;
+			for(size_t index = g_parameterAddressIndex; index < bytes.size(); ++index) sum += bytes[index];
+			const auto modulus = uint32_t{g_midiDataMask} + 1;
+			return static_cast<uint8_t>((modulus - (sum & g_midiDataMask)) & g_midiDataMask);
+		}
+
+		synthLib::SMidiEvent parameterMessage(const uint8_t command, const uint32_t address,
+		                                      const std::vector<uint8_t>& body)
+		{
+			synthLib::SMidiEvent event(synthLib::MidiEventSource::Internal);
+			event.sysex = {g_sysexStart, g_rolandId, g_defaultUnitId, g_mt32ModelId, command};
+			appendAddress(event.sysex, address);
+			event.sysex.insert(event.sysex.end(), body.begin(), body.end());
+			event.sysex.push_back(checksum(event.sysex));
+			event.sysex.push_back(g_sysexEnd);
+			return event;
+		}
+
+		bool validParameterRange(const uint32_t address, const size_t size)
+		{
+			return size != 0 && address < g_midiAddressLimit && size <= g_midiAddressLimit - address;
+		}
 		// The reverb return's share of the low-pass summing node on the new-type boards,
 		// 6.8k / 10k. munt's silicon-traced reverb model finds the old-type board's return at
 		// unity next to the dry channels; its summing network has not been read here.
@@ -357,5 +412,77 @@ namespace emu88Lib
 		clone->m_vcaGain = m_vcaGain;
 		clone->m_analogSample = m_analogSample;
 		return clone;
+	}
+
+	bool LaBoard::queryParameterBlock(const uint32_t address, const size_t size,
+	                                const size_t maxSamples, std::vector<uint8_t>& data)
+	{
+		if(!m_valid || !validParameterRange(address, size) || maxSamples == 0) return false;
+		synthLib::SysexBuffer encodedSize;
+		appendAddress(encodedSize, static_cast<uint32_t>(size));
+		const std::vector<uint8_t> body(encodedSize.begin(), encodedSize.end());
+		addMidiEvent(parameterMessage(g_requestData, address, body));
+		std::vector<uint8_t> received(size);
+		std::vector<bool> seen(size);
+		size_t count = 0;
+		for(size_t sample = 0; sample < maxSamples; ++sample)
+		{
+			renderSample();
+			std::vector<synthLib::SMidiEvent> events;
+			readMidiOut(events);
+			for(const auto& event : events)
+			{
+				const auto& packet = event.sysex;
+				if(packet.size() < g_minDataSetBytes || packet.front() != g_sysexStart ||
+				   packet.back() != g_sysexEnd || packet[1] != g_rolandId ||
+				   packet[2] != g_defaultUnitId || packet[3] != g_mt32ModelId ||
+				   packet[4] != g_dataSet) continue;
+				const auto packetAddress = decodeAddress(packet, g_parameterAddressIndex);
+				const auto packetSize = packet.size() - g_minDataSetBytes;
+				if(packetAddress >= address + size || packetAddress + packetSize <= address) continue;
+				uint32_t sum = 0;
+				for(size_t index = g_parameterAddressIndex; index < packet.size() - 1; ++index)
+				{
+					if(packet[index] > g_midiDataMask) return false;
+					sum += packet[index];
+				}
+				if((sum & g_midiDataMask) != 0 || packetAddress < address ||
+				   packetSize > size || packetAddress - address > size - packetSize) return false;
+				for(size_t index = 0; index < packetSize; ++index)
+				{
+					const auto offset = packetAddress - address + index;
+					const auto value = packet[g_parameterDataIndex + index];
+					if(seen[offset] && received[offset] != value) return false;
+					if(!seen[offset]) { seen[offset] = true; ++count; }
+					received[offset] = value;
+				}
+				if(count == size)
+				{
+					data = std::move(received);
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	bool LaBoard::requestParameterBlock(const uint32_t address, const size_t size,
+	                                   const size_t maxSamples, std::vector<uint8_t>& data) const
+	{
+		auto privateBoard = cloneExecution();
+		return privateBoard && privateBoard->queryParameterBlock(address, size, maxSamples, data);
+	}
+
+	bool LaBoard::writeAndVerifyParameterBlock(const uint32_t address,
+	                                           const std::vector<uint8_t>& data,
+	                                           const size_t maxSamples)
+	{
+		if(!m_valid || !validParameterRange(address, data.size()) || maxSamples == 0 ||
+		   std::any_of(data.begin(), data.end(), [](const uint8_t value) {
+			   return value > g_midiDataMask;
+		   })) return false;
+		addMidiEvent(parameterMessage(g_dataSet, address, data));
+		std::vector<uint8_t> readback;
+		return queryParameterBlock(address, data.size(), maxSamples, readback) && readback == data;
 	}
 }

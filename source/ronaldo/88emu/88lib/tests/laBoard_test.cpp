@@ -1,8 +1,11 @@
 #include "88lib/boards/laBoard.h"
+#include "88lib/rom/romloader.h"
 #include "common/test_util.hpp"
+#include "synthLib/romLoader.h"
 
 #include <algorithm>
 #include <memory>
+#include <string_view>
 
 namespace
 {
@@ -56,7 +59,7 @@ namespace
 	}
 }
 
-int main()
+int main(int argc, char** argv)
 {
 	using emu88Lib::LaBoard;
 
@@ -334,6 +337,66 @@ int main()
 				CHECK(clone->renderSample() == second->renderSample());
 		}
 	}
+
+	// Optional real-ROM probe: laBoard_test <mt32-old|mt32-new|cm32l> <rom-directory>.
+	// Roland's MT-32 MIDI Implementation
+	// §§3 and 5 specify RQ1/DT1, patch temporary 03 00 00 and system 10 00 00.
+	// The 4-byte system slice covers tuning and reverb mode/time/level, with no
+	// ignored dummy field. The first two patch bytes choose group and timbre.
+	if(argc == 3)
+	{
+		const std::string_view name(argv[1]);
+		const auto model = name == "mt32-old" ? LaModel::Mt32Old :
+		                   name == "mt32-new" ? LaModel::Mt32New : LaModel::Cm32l;
+		CHECK(name == "mt32-old" || name == "mt32-new" || name == "cm32l");
+		synthLib::RomLoader::setSearchPath(argv[2]);
+		emu88Lib::RomLoader::rescan();
+		const auto roms = emu88Lib::RomLoader::findLaRomSet(model);
+		CHECK(roms.isValid());
+		if(roms.isValid())
+		{
+			constexpr uint32_t systemAddress = 0x10u << 14;
+			constexpr uint32_t patchOneAddress = 0x03u << 14;
+			constexpr size_t systemSoundBytes = 4;
+			constexpr size_t patchSelectionBytes = 2;
+			constexpr size_t bootSamples = LaBoard::SampleRate * 10;
+			constexpr size_t replyBudgetSamples = LaBoard::SampleRate * 5;
+			LaBoard source(roms);
+			run(source, bootSamples);
+			// Program change for part 1, whose documented power-on channel is 2.
+			source.addMidiEvent(synthLib::SMidiEvent(synthLib::MidiEventSource::Host, 0xc1, 17));
+			run(source, LaBoard::SampleRate);
+			std::vector<uint8_t> patch;
+			CHECK(source.requestParameterBlock(patchOneAddress, patchSelectionBytes,
+			                                   replyBudgetSamples, patch));
+			CHECK(patch.size() == patchSelectionBytes);
+			std::vector<uint8_t> system;
+			CHECK(source.requestParameterBlock(systemAddress, systemSoundBytes,
+			                                   replyBudgetSamples, system));
+			CHECK(system.size() == systemSoundBytes);
+			if(patch.size() == patchSelectionBytes && system.size() == systemSoundBytes)
+			{
+				// One audible reverb level edit through the firmware's own DT1 handler.
+				system.back() = system.back() == 0 ? 1 : 0;
+				CHECK(source.writeAndVerifyParameterBlock(systemAddress, system,
+				                                         replyBudgetSamples));
+				LaBoard restored(roms);
+				run(restored, bootSamples);
+				CHECK(restored.writeAndVerifyParameterBlock(systemAddress, system,
+				                                           replyBudgetSamples));
+				CHECK(restored.writeAndVerifyParameterBlock(patchOneAddress, patch,
+				                                           replyBudgetSamples));
+				std::vector<uint8_t> savedSystem, savedPatch;
+				CHECK(restored.requestParameterBlock(systemAddress, systemSoundBytes,
+				                                     replyBudgetSamples, savedSystem));
+				CHECK(restored.requestParameterBlock(patchOneAddress, patchSelectionBytes,
+				                                     replyBudgetSamples, savedPatch));
+				CHECK(savedSystem == system);
+				CHECK(savedPatch == patch);
+			}
+		}
+	}
+	else CHECK(argc == 1);
 
 	return test::finish("la board");
 }

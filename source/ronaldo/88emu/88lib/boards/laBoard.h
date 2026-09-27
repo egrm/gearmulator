@@ -111,6 +111,14 @@ namespace emu88Lib
 		// Private, independent continuation for firmware-side settings queries.
 		// Caller must own the board exclusively between completed renderSample calls.
 		std::unique_ptr<LaBoard> cloneExecution() const;
+		// RQ1/DT1 operate through the firmware UART, never by guessing its RAM map.
+		// Query runs on a private clone. Both calls fail unless every requested
+		// byte is returned with valid address and checksum inside maxSamples.
+		bool requestParameterBlock(uint32_t address, size_t size, size_t maxSamples,
+		                           std::vector<uint8_t>& data) const;
+		// For a fresh, silent restore candidate only; consumes its MIDI output.
+		bool writeAndVerifyParameterBlock(uint32_t address, const std::vector<uint8_t>& data,
+		                                  size_t maxSamples);
 
 		// What the two board generations do to a 16-bit audio word on its way from the LA32
 		// to the reverb and the DAC; public so the tests can pin them down.
@@ -145,6 +153,8 @@ namespace emu88Lib
 		void writeBank(uint16_t offset, uint8_t value);
 		void flushLcd(uint8_t control);
 		void updateReverbParameters();
+		bool queryParameterBlock(uint32_t address, size_t size, size_t maxSamples,
+		                         std::vector<uint8_t>& data);
 		float applyVca();
 		uint8_t* directRam() { return m_machine.bus().ptr(DirectRamBase); }
 		const uint8_t* directRam() const { return m_machine.bus().mem() + DirectRamBase; }
