@@ -492,6 +492,94 @@ void tracePanelCandidate(Sc88& board, Model model)
     stable(*repeatedBoard,secondLevel,g_partLevelOffset,"second-level-stability");
 }
 
+void traceUserInstAudio(const std::vector<uint8_t>& editedImage,
+                       const std::vector<uint8_t>& controlImage,
+                       const std::vector<uint8_t>& rom,
+                       const std::vector<uint8_t>& waves, Model model)
+{
+    // Compare repeated fresh reopenings at the same native timeline. Live
+    // CPU phase is deliberately not an exact-PCM reference (family audit).
+    const auto reopen=[&](const std::vector<uint8_t>& image)
+    {
+        auto board=std::make_unique<Sc88>(rom,waves,model,false);
+        require(Sc88Settings::restore(*board,image)==Sc88Settings::Result::Success,
+                "UserInst audio restore failed");
+        return board;
+    };
+    auto first=reopen(editedImage);
+    std::vector<uint8_t> reopenedImage;
+    require(Sc88Settings::capture(*first,reopenedImage)==Sc88Settings::Result::Success,
+            "UserInst repeated audio capture failed");
+    auto second=reopen(reopenedImage);
+    auto control=reopen(controlImage);
+    const auto word=[](const std::vector<uint8_t>& ram,size_t address)
+    { return static_cast<uint16_t>((uint16_t{ram.at(address)}<<8)|ram.at(address+1)); };
+    const auto pointers=model==Model::Sc88?size_t{0xdf70}:size_t{0xdf72};
+    const size_t a1Record=word(Sc88ExecutionProbe::ram(*first),pointers+2);
+    require(word(Sc88ExecutionProbe::ram(*control),pointers+2)==a1Record &&
+            word(Sc88ExecutionProbe::ram(*first),a1Record)==
+            word(Sc88ExecutionProbe::ram(*control),a1Record),
+            "UserInst audio control selects a different program");
+    for(const auto address:{size_t{0x8042},size_t{a1Record+8},size_t{a1Record+9}})
+        require(Sc88ExecutionProbe::ram(*first)[address]==Sc88ExecutionProbe::ram(*control)[address],
+                "UserInst audio control changes master volume, part level or pan");
+    bool changedNativeEdit{};
+    for(size_t address=0x87f0;address<0x87f5;++address)
+        changedNativeEdit|=editedImage[address]!=controlImage[address];
+    require(changedNativeEdit,"native filter/envelope audio control has no changed edit");
+    // A1's independently measured secondary working record begins at87E8.
+    for(size_t field=0x87ee;field<0x87f6;++field)
+    {
+        require(Sc88ExecutionProbe::ram(*first)[field]==editedImage[field] &&
+                Sc88ExecutionProbe::ram(*second)[field]==editedImage[field],
+                "UserInst audio oracle lost an edited working value");
+        require(Sc88ExecutionProbe::ram(*control)[field]==controlImage[field],
+                "UserInst audio control lost its native working value");
+    }
+    const auto peak=[](Sc88::SampleFrame frame)
+    {
+        const auto magnitude=[](int32_t value)
+        { return value<0?-int64_t{value}:int64_t{value}; };
+        return std::max(magnitude(frame.first),magnitude(frame.second));
+    };
+    size_t idleDifference{}, controlIdleDifference{}, noteDifference{}, controlDifference{};
+    int64_t idlePeak{}, notePeak{}, controlPeak{};
+    // Measure silent continuation on independent clones so the sounding
+    // boards receive their first note immediately after the adapter returns.
+    auto idleFirst=first->cloneExecution();
+    auto idleSecond=second->cloneExecution();
+    auto idleControl=control->cloneExecution();
+    require(idleFirst && idleSecond && idleControl,"UserInst idle clone unavailable");
+    for(unsigned sample{};sample<g_sampleRate/10;++sample)
+    {
+        const auto a=idleFirst->renderSample(),b=idleSecond->renderSample();
+        const auto c=idleControl->renderSample();
+        idleDifference+=a!=b;
+        controlIdleDifference+=a!=c;
+        idlePeak=std::max(idlePeak,peak(a));
+    }
+    synthLib::SMidiEvent note(synthLib::MidiEventSource::Host);
+    note.a=0x90; note.b=60; note.c=100;
+    for(auto* board:{first.get(),second.get(),control.get()}) board->addMidiEvent(note,0);
+    for(unsigned sample{};sample<g_sampleRate;++sample)
+    {
+        const auto a=first->renderSample(),b=second->renderSample(),c=control->renderSample();
+        noteDifference+=a!=b;
+        controlDifference+=a!=c;
+        notePeak=std::max(notePeak,peak(a));
+        controlPeak=std::max(controlPeak,peak(c));
+    }
+    std::cout << "UserInst-audio model=" << static_cast<int>(model)
+              << " idle-difference=" << idleDifference << " repeated-note-difference=" << noteDifference
+              << " control-idle-difference=" << controlIdleDifference
+              << " native-control-difference=" << controlDifference << " idle-peak=" << idlePeak
+              << " note-peak=" << notePeak << " control-peak=" << controlPeak << '\n';
+    require(idleDifference==0 && noteDifference==0,"repeated UserInst recall changes exact PCM");
+    require(controlIdleDifference==0,"UserInst control already differs before note input");
+    require(notePeak>idlePeak && controlDifference>0,
+            "native UserInst filter/envelope control did not change sounding PCM");
+}
+
 bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
                       const std::vector<uint8_t>& waves, Model model, bool userPage=false,
                       unsigned userGroup=0)
@@ -611,6 +699,7 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
     std::array<std::vector<uint8_t>,g_partCount> images;
     std::array<std::string,g_partCount> sourceLcd;
     std::array<std::vector<size_t>,g_partCount> sourceTargets;
+    std::vector<uint8_t> userAudioControl;
     for(size_t slot{};slot<sources.size();++slot)
     {
         if(userPage && slot!=0 && slot!=1 && slot!=16 && slot!=17) continue;
@@ -627,6 +716,9 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
             for(unsigned edit{};edit<3;++edit)
                 require(press(source,Button::VibDelayR,"source-saved-delay"),
                         "source delay edit did not settle");
+            if(slot==0 && userGroup==0)
+                require(Sc88Settings::capture(source,userAudioControl)==Sc88Settings::Result::Success,
+                        "native pre-filter/envelope audio control capture failed");
             // Roland's SC-88 Editing User Instruments procedure: Select cycles
             // Vibrato, Filter, Envelope; the same three button pairs edit each.
             require(press(source,Button::Select,"source-filter"),"filter did not settle");
@@ -732,6 +824,8 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
                       "native UserInst control did not reach distinct saved value",0);
         }
     }
+    if(userPage && userGroup==0)
+        traceUserInstAudio(images[0],userAudioControl,rom,waves,model);
     for(uint8_t preference : {uint8_t{0},uint8_t{1}})
         for(size_t slot{};slot<g_partCount;++slot)
         {
@@ -785,6 +879,38 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
                               "next UserInst value differs",preference);
                 check(visible(*restored)==visible(*sources[slot]),
                       "next UserInst LCD differs",preference);
+                auto continuedSource=sources[slot]->cloneExecution();
+                require(bool(continuedSource),"program continuation clone unavailable");
+                for(auto* board:{continuedSource.get(),restored.get()})
+                    require(press(*board,Button::UserInst,"leave-UserInst-before-program"),
+                            "leaving UserInst did not settle");
+                // Native primary-part pointer tables: SC DF70 / VL DF72.
+                const auto internalPart=word(Sc88ExecutionProbe::ram(*continuedSource),partAddress);
+                const auto pointers=model==Model::Sc88?size_t{0xdf70}:size_t{0xdf72};
+                const auto record=word(Sc88ExecutionProbe::ram(*continuedSource),pointers+2*internalPart);
+                const auto originalProgram=word(Sc88ExecutionProbe::ram(*continuedSource),record);
+                for(const auto button:{Button::InstR,Button::InstL})
+                {
+                    const auto previousProgram=word(Sc88ExecutionProbe::ram(*continuedSource),record);
+                    require(press(*continuedSource,button,"source-program-continuation"),
+                            "source program change did not settle");
+                    require(press(*restored,button,"restored-program-continuation"),
+                            "restored program change did not settle");
+                    const auto& referenceRam=Sc88ExecutionProbe::ram(*continuedSource);
+                    const auto& continuedRam=Sc88ExecutionProbe::ram(*restored);
+                    check(word(referenceRam,record)!=previousProgram,
+                          "native program continuation did not change program",preference);
+                    check(word(continuedRam,record)==word(referenceRam,record),
+                          "program continuation selected a different program",preference);
+                    for(const auto address:userRateFields)
+                        for(size_t field{};field<8;++field)
+                            check(continuedRam[address+field]==referenceRam[address+field],
+                                  "program continuation changed UserInst edits differently",preference);
+                    check(visible(*restored)==visible(*continuedSource),
+                          "program continuation LCD differs",preference);
+                }
+                check(word(Sc88ExecutionProbe::ram(*continuedSource),record)==originalProgram,
+                      "native away/back did not return to original program",preference);
             }
         }
     return passed;
