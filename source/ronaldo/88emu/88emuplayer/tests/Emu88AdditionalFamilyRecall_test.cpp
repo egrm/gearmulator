@@ -34,6 +34,11 @@ namespace
     constexpr uint8_t initialVolume = 100;
     constexpr uint8_t firstEditedVolume = 101;
     constexpr uint8_t secondEditedVolume = 102;
+    // SC-155 Rev1 probe established selected panel level at 0xC0. These
+    // adjacent preset/send candidates are asserted fail-closed by the first
+    // native panel run; they are not promoted to an adapter mapping yet.
+    constexpr size_t sc155SelectedProgramAddress = 0xb9;
+    constexpr size_t sc155SelectedReverbAddress = 0xc7;
 
     void render(emu88Player::Processor& processor, int frames, juce::MidiBuffer midi = {})
     {
@@ -94,6 +99,88 @@ namespace
         render(processor, static_cast<int>(sampleRate / 10));
         processor.setPanelButtons(0);
         render(processor, static_cast<int>(sampleRate / 4));
+    }
+
+    void pressSc155Panel(emu88Player::Processor& processor, emu88Lib::Button button)
+    {
+        processor.setPanelButtons(emu88Lib::buttonBit(button));
+        render(processor, panelHoldFrames);
+        processor.setPanelButtons(0);
+        render(processor, panelReleaseFrames);
+    }
+
+    void runSc155Producer()
+    {
+        juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
+        emu88Player::Processor source;
+        CHECK(source.setDeviceModel(emu88Lib::DeviceModel::Sc155));
+        CHECK(source.hasValidRom());
+        source.setRateAndBufferSizeDetails(sampleRate, blockSize);
+        source.prepareToPlay(sampleRate, blockSize);
+        source.config().setValue("audioSetup", "host-owned-routing-marker");
+        source.config().setValue("portMidiEnabled", true);
+        const auto initial = hardware(save(source));
+        CHECK(initial.model == emu88Lib::DeviceModel::Sc155);
+        CHECK(initial.memory.size() > sc155SelectedReverbAddress);
+        CHECK_EQ(initial.memory.at(selectedPartVolumeAddress), initialVolume);
+        CHECK_EQ(initial.memory.at(sc155SelectedProgramAddress), 0);
+        CHECK_EQ(initial.memory.at(sc155SelectedReverbAddress), 40);
+
+        // Both edits target the panel-selected part; the earlier C1 MIDI
+        // diagnostic targeted a different SC-155 part and is not used here.
+        pressSc155Panel(source, emu88Lib::Button::InstR);
+        const auto preset = hardware(save(source));
+        CHECK_EQ(preset.memory.at(sc155SelectedProgramAddress),
+                 initial.memory.at(sc155SelectedProgramAddress) + 1);
+        pressSc155Panel(source, emu88Lib::Button::ReverbR);
+        const auto wet = save(source);
+        const auto wetHardware = hardware(wet);
+        CHECK_EQ(wetHardware.memory.at(sc155SelectedProgramAddress),
+                 preset.memory.at(sc155SelectedProgramAddress));
+        CHECK_EQ(wetHardware.memory.at(sc155SelectedReverbAddress),
+                 preset.memory.at(sc155SelectedReverbAddress) + 1);
+        CHECK_EQ(wetHardware.memory.at(sc155SelectedProgramAddress), 1);
+        CHECK_EQ(wetHardware.memory.at(sc155SelectedReverbAddress), 41);
+
+        juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
+        emu88Player::Processor restored;
+        restored.setRateAndBufferSizeDetails(sampleRate, blockSize);
+        restored.prepareToPlay(sampleRate, blockSize);
+        restored.setStateInformation(wet.getData(), static_cast<int>(wet.getSize()));
+        CHECK(restored.lastStateOperationSucceeded());
+        const auto roundTrip = hardware(save(restored));
+        for(const auto address : {sc155SelectedProgramAddress, sc155SelectedReverbAddress,
+                                  selectedPartVolumeAddress})
+            CHECK_EQ(roundTrip.memory.at(address), wetHardware.memory.at(address));
+        const auto fixture = juce::File(emu88Player::defaultDataFolder())
+            .getChildFile("additional-family-sc155-wet-model-10.component");
+        CHECK(fixture.replaceWithData(wet.getData(), wet.getSize()));
+        // Follow the firmware's own selected-part panel edit down to zero.
+        // This avoids assuming SC-155's MIDI channel assignment matches its
+        // currently selected physical part.
+        for(uint8_t value = wetHardware.memory.at(sc155SelectedReverbAddress); value > 0; --value)
+            pressSc155Panel(source, emu88Lib::Button::ReverbL);
+        const auto dry = save(source);
+        const auto dryHardware = hardware(dry);
+        CHECK_EQ(dryHardware.memory.at(sc155SelectedProgramAddress), 1);
+        CHECK_EQ(dryHardware.memory.at(sc155SelectedReverbAddress), 0);
+        juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
+        emu88Player::Processor dryRestored;
+        dryRestored.setRateAndBufferSizeDetails(sampleRate, blockSize);
+        dryRestored.prepareToPlay(sampleRate, blockSize);
+        dryRestored.setStateInformation(dry.getData(), static_cast<int>(dry.getSize()));
+        CHECK(dryRestored.lastStateOperationSucceeded());
+        const auto dryRoundTrip = hardware(save(dryRestored));
+        CHECK_EQ(dryRoundTrip.memory.at(sc155SelectedProgramAddress), 1);
+        CHECK_EQ(dryRoundTrip.memory.at(sc155SelectedReverbAddress), 0);
+        CHECK(juce::File(emu88Player::defaultDataFolder())
+            .getChildFile("additional-family-sc155-dry-model-10.component")
+            .replaceWithData(dry.getData(), dry.getSize()));
+        std::cout << "SC-155 selected panel program "
+                  << unsigned(initial.memory.at(sc155SelectedProgramAddress)) << " -> "
+                  << unsigned(wetHardware.memory.at(sc155SelectedProgramAddress))
+                  << ", reverb " << unsigned(preset.memory.at(sc155SelectedReverbAddress))
+                  << " -> " << unsigned(wetHardware.memory.at(sc155SelectedReverbAddress)) << '\n';
     }
 
     void requireMt32ProducerOracle(const emu88Lib::SettingsChunk& state, bool dry)
@@ -317,6 +404,7 @@ int main(int argc, char** argv)
 {
     if(!std::getenv("TUS_DATA_FOLDER") || !std::getenv("TUS_TEST_ROM_DIR")) return 77;
     if(argc != 2 || (std::string{argv[1]} != "--sc55-mk1" &&
+                     std::string{argv[1]} != "--sc155" &&
                      std::string{argv[1]} != "--mt32-old" &&
                      std::string{argv[1]} != "--mt32-new" &&
                      std::string{argv[1]} != "--cm32l" &&
@@ -332,6 +420,12 @@ int main(int argc, char** argv)
         runMt32PanelProbe();
         emu88Player::standaloneLaunch = nullptr;
         return test::finish("88emuMt32OldPanelProbe");
+    }
+    if(std::string{argv[1]} == "--sc155")
+    {
+        runSc155Producer();
+        emu88Player::standaloneLaunch = nullptr;
+        return test::finish("88emuSc155ProducerRecall");
     }
     if(std::string{argv[1]} == "--mt32-old")
     {

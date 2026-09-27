@@ -43,6 +43,7 @@ namespace emu88Lib
 	class Sc55Board final
 	{
 		friend class Sc55Settings;
+		friend class Sc155Settings;
 	public:
 
 		// External interrupt pins as this board wires them: the GP's voice-end

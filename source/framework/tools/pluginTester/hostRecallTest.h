@@ -438,6 +438,21 @@ namespace hostRecallTest
 					description);
 			return;
 		}
+		if(model == 10 && (seedKind == "producer-sc155-wet" || seedKind == "producer-sc155-dry"))
+		{
+			// SC-155 Rev1 native selected-panel InstR/ReverbR fixture.
+			// These two offsets must first pass its fail-closed processor oracle.
+			constexpr size_t programAddress = 0xb9;
+			constexpr size_t reverbAddress = 0xc7;
+			require(sc88HardwareByte(seed, programAddress) == 1 &&
+				sc88HardwareByte(seed, reverbAddress) ==
+					(seedKind == "producer-sc155-dry" ? 0 : 41),
+				"Native SC-155 selected panel part has program 1 and requested reverb send");
+			for(const auto address : {programAddress, reverbAddress})
+				require(sc88HardwareByte(actual, address) == sc88HardwareByte(seed, address),
+					description);
+			return;
+		}
 		if(isLaModel(model) && isLaProducerSeed(seedKind))
 		{
 			// LaSettings.h layout 1: system 4, patch head 7, patch tail 2,

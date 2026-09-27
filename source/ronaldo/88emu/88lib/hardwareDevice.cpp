@@ -14,6 +14,7 @@
 #include "88lib/boards/sc55Board.h"
 #include "88lib/boards/laSettings.h"
 #include "88lib/boards/sc55Settings.h"
+#include "88lib/boards/sc155Settings.h"
 #include "88lib/boards/sc88pro.h"
 #include "88lib/boards/sc88proSettings.h"
 #include "88lib/settingsChunk.h"
@@ -226,8 +227,13 @@ namespace emu88Lib
 				m_assetDigests.push_back(baseLib::MD5(wave).getWords());
 			m_sc55 = std::make_unique<Sc55Board>(std::move(roms), factoryReset);
 			m_sc55->setSwitchPosition(Sc55Board::SwitchMidi);
-			if(_settings && Sc55Settings::restore(*m_sc55, _settings->memory) != Sc55Settings::Result::Success)
-				m_sc55.reset();
+			if(_settings)
+			{
+				const bool restored = m_model == DeviceModel::Sc155 ?
+					Sc155Settings::restore(*m_sc55, _settings->memory) == Sc155Settings::Result::Success :
+					Sc55Settings::restore(*m_sc55, _settings->memory) == Sc55Settings::Result::Success;
+				if(!restored) m_sc55.reset();
+			}
 			break;
 		}
 		case DeviceModel::Nu10b:
@@ -310,6 +316,8 @@ namespace emu88Lib
 			return settings.layout == Sc88Settings::LayoutVersion && settings.memory.size() == Sc88::SramSize;
 		case DeviceModel::Sc55Mk1:
 			return settings.layout == Sc55Settings::LayoutVersion && settings.memory.size() == Sc55Board::SramSize;
+		case DeviceModel::Sc155:
+			return settings.layout == Sc155Settings::LayoutVersion && settings.memory.size() == Sc55Board::SramSize;
 		case DeviceModel::Mt32Old:
 		case DeviceModel::Mt32New:
 		case DeviceModel::Cm32l:
@@ -354,7 +362,7 @@ namespace emu88Lib
 				if(!board) return std::unique_ptr<HardwareDevice>{};
 				return std::unique_ptr<HardwareDevice>(new HardwareDevice(params, model, std::move(board), CaptureTag{}));
 			};
-		if(m_sc55 && Sc55Settings::supported(*m_sc55))
+		if(m_sc55 && (Sc55Settings::supported(*m_sc55) || Sc155Settings::supported(*m_sc55)))
 			return [params = getDeviceCreateParams(), model = m_model,
 			        prepareBoard = m_sc55->prepareExecutionClone()]() mutable
 			{
@@ -440,7 +448,9 @@ namespace emu88Lib
 		       ((m_la && LaSettings::isCaptureBoundary(*m_la)) ||
 		        (m_sc88Pro && Sc88ProSettings::isCaptureBoundary(*m_sc88Pro, true)) ||
 		        (m_sc88 && Sc88Settings::isCaptureBoundary(*m_sc88, true)) ||
-		        (m_sc55 && m_sc55MidiIn && m_sc55MidiIn->isInputDrained() && Sc55Settings::isCaptureBoundary(*m_sc55)));
+		        (m_sc55 && m_sc55MidiIn && m_sc55MidiIn->isInputDrained() &&
+		         (m_model == DeviceModel::Sc155 ? Sc155Settings::isCaptureBoundary(*m_sc55) :
+		                                         Sc55Settings::isCaptureBoundary(*m_sc55))));
 	}
 
 	SettingsChunk HardwareDevice::captureSettings() const
@@ -450,9 +460,12 @@ namespace emu88Lib
 		result.model = m_model;
 		if(m_sc55)
 		{
-			result.layout = Sc55Settings::LayoutVersion;
+			result.layout = m_model == DeviceModel::Sc155 ? Sc155Settings::LayoutVersion : Sc55Settings::LayoutVersion;
 			result.firmware = m_assetDigests.front();
-			if(Sc55Settings::capture(*m_sc55, result.memory) != Sc55Settings::Result::Success)
+			const bool captured = m_model == DeviceModel::Sc155 ?
+				Sc155Settings::capture(*m_sc55, result.memory) == Sc155Settings::Result::Success :
+				Sc55Settings::capture(*m_sc55, result.memory) == Sc55Settings::Result::Success;
+			if(!captured)
 				throw std::runtime_error("SC55 settings capture rejected");
 			return result;
 		}
@@ -733,6 +746,8 @@ namespace emu88Lib
 		   !Sc88Settings::isPanelInputBoundary(*m_sc88)) return;
 		if(m_sc55 && Sc55Settings::supported(*m_sc55) &&
 		   !Sc55Settings::isPanelInputBoundary(*m_sc55)) return;
+		if(m_sc55 && Sc155Settings::supported(*m_sc55) &&
+		   !Sc155Settings::isPanelInputBoundary(*m_sc55)) return;
 		const auto command = m_panelCommands.front();
 		m_panelCommands.pop_front();
 		if(command.type == PanelCommandType::Buttons)
