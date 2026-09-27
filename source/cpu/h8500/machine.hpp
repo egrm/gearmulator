@@ -172,6 +172,33 @@ class Machine final : public ResetSink {
     });
   }
 
+  // The H8/532 carries 1 KiB of on-chip RAM plus its own PWM/system register
+  // blocks. Preserve destination bus maps and peripheral/board callbacks.
+  template<class Rebind>
+  bool copy_runtime_from_532(const Machine& source, Rebind&& boardRebind) {
+    if (cfg_.model != ChipModel::H8_532 || source.cfg_.model != cfg_.model ||
+        cfg_.mode != source.cfg_.mode || !cpu_.copy_runtime_from(source.cpu_)) return false;
+    bus_.load(cfg_.ram_base, source.bus_.mem() + cfg_.ram_base, cfg_.ram_size);
+    intc_.copy_runtime_from(source.intc_);
+    for (size_t i{}; i < std::size(frt_); ++i) frt_[i].copy_runtime_from(source.frt_[i]);
+    tmr_.copy_runtime_from(source.tmr_);
+    wdt_.copy_runtime_from(source.wdt_);
+    for (size_t i{}; i < std::size(sci_); ++i) sci_[i].copy_runtime_from(source.sci_[i]);
+    adc_.copy_runtime_from(source.adc_);
+    ports_.copy_runtime_from(source.ports_);
+    pwm532_.copy_runtime_from(source.pwm532_);
+    sysregs532_.copy_runtime_from(source.sysregs532_);
+    resets_ = source.resets_;
+    return sched_.copy_pending_from(source.sched_, [&](void* owner) -> std::optional<void*> {
+      for (size_t i{}; i < std::size(frt_); ++i) if (owner == &source.frt_[i]) return &frt_[i];
+      for (size_t i{}; i < std::size(sci_); ++i) if (owner == &source.sci_[i]) return &sci_[i];
+      if (owner == &source.tmr_) return &tmr_;
+      if (owner == &source.wdt_) return &wdt_;
+      if (owner == &source.adc_) return &adc_;
+      return boardRebind(owner);
+    });
+  }
+
   // Current time in states (phi clock cycles).
   u64 now() const { return cpu_.total_states(); }
 

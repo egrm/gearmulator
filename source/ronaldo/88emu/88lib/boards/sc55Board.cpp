@@ -48,6 +48,17 @@ namespace emu88Lib
 	}
 
 	Sc55Board::Sc55Board(Sc55RomSet _roms, const bool _factoryReset)
+		: Sc55Board(std::move(_roms), _factoryReset, false)
+	{
+	}
+
+	Sc55Board::Sc55Board(Sc55RomSet _roms, ExecutionCloneTag)
+		: Sc55Board(std::move(_roms), false, true)
+	{
+		m_captureShell = true;
+	}
+
+	Sc55Board::Sc55Board(Sc55RomSet _roms, const bool _factoryReset, const bool _wavesAlreadyDecoded)
 		: m_roms(std::move(_roms))
 		, m_profile(m_roms.profile())
 		, m_gp(gpLib::GpConfig{m_profile.generation == Sc55Generation::First ? Mk1GpClockHz : Mk2GpClockHz,
@@ -61,7 +72,7 @@ namespace emu88Lib
 		{
 			if(m_roms.waveRom[slot].empty())
 				continue;
-			descrambleWaveRom(m_roms.waveRom[slot]);
+			if(!_wavesAlreadyDecoded) descrambleWaveRom(m_roms.waveRom[slot]);
 			m_gp.setWaveRom(m_profile.waveBanks[slot], m_roms.waveRom[slot]);
 		}
 
@@ -97,6 +108,72 @@ namespace emu88Lib
 		// Every board with a panel takes the procedure; the headless ones have no switches to drive.
 		if(_factoryReset && hasPanel())
 			runFactoryReset();
+	}
+
+	std::function<std::unique_ptr<Sc55Board>()> Sc55Board::prepareExecutionClone() const
+	{
+		if(!m_valid) return {};
+		// The live board already owns decoded wave images. A private shell must
+		// install them unchanged rather than applying the hardware scramble twice.
+		return [roms = m_roms]() mutable
+		{
+			if(!roms.isValid()) return std::unique_ptr<Sc55Board>{};
+			return std::unique_ptr<Sc55Board>(new Sc55Board(std::move(roms), ExecutionCloneTag{}));
+		};
+	}
+
+	bool Sc55Board::acceptsExecutionFrom(const Sc55Board& source) const
+	{
+		return m_captureShell && source.m_valid && !source.m_machine.cpu().in_slice() &&
+		       m_roms.model == source.m_roms.model &&
+		       m_roms.internalRom == source.m_roms.internalRom &&
+		       m_roms.programRom == source.m_roms.programRom &&
+		       m_roms.waveRom == source.m_roms.waveRom;
+	}
+
+	bool Sc55Board::copyExecutionFrom(const Sc55Board& source)
+	{
+		if(!acceptsExecutionFrom(source)) return false;
+		m_captureShell = false;
+		if(!m_gp.copyRuntimeFrom(source.m_gp)) return false;
+		m_subMcu.copyRuntimeFrom(source.m_subMcu);
+		m_sram = source.m_sram;
+		m_lcd = source.m_lcd;
+		m_lcd.setChangeCallback({});
+		m_lcd.setCgRamChangeCallback({});
+		m_lcd.setCursorChangeCallback({});
+		m_buttons = source.m_buttons;
+		m_panelColumns = source.m_panelColumns;
+		m_leds = source.m_leds;
+		m_midiOut = source.m_midiOut;
+		m_samplesRendered = source.m_samplesRendered;
+		m_cycleTarget = source.m_cycleTarget;
+		m_cycleFrac = source.m_cycleFrac;
+		m_irqLine[0] = source.m_irqLine[0];
+		m_irqLine[1] = source.m_irqLine[1];
+		m_gaInt = source.m_gaInt;
+		m_gaIntTrigger = source.m_gaIntTrigger;
+		m_gaIrqEnable = source.m_gaIrqEnable;
+		m_ioSd = source.m_ioSd;
+		m_lcdEnabled = source.m_lcdEnabled;
+		m_switchPosition = source.m_switchPosition;
+		m_lcdIrqAt = source.m_lcdIrqAt;
+		return m_machine.copy_runtime_from_532(source.m_machine,
+			[this, &source](void* owner) -> std::optional<void*>
+			{
+				if(owner == &source) return this;
+				return std::nullopt;
+			});
+	}
+
+	std::unique_ptr<Sc55Board> Sc55Board::cloneExecution() const
+	{
+		if(!m_valid || m_machine.cpu().in_slice()) return {};
+		auto prepare = prepareExecutionClone();
+		if(!prepare) return {};
+		auto result = prepare();
+		if(!result || !result->copyExecutionFrom(*this)) return {};
+		return result;
 	}
 
 	void Sc55Board::powerCycle()

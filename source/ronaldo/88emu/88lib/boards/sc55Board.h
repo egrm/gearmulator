@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -94,6 +95,12 @@ namespace emu88Lib
 		Sc55Board& operator=(const Sc55Board&) = delete;
 
 		bool isValid() const { return m_valid; }
+		// Prepare immutable ROM assets before the host's short capture lock. The
+		// returned factory owns its assets and can create one private board shell.
+		std::function<std::unique_ptr<Sc55Board>()> prepareExecutionClone() const;
+		bool acceptsExecutionFrom(const Sc55Board& source) const;
+		bool copyExecutionFrom(const Sc55Board& source);
+		std::unique_ptr<Sc55Board> cloneExecution() const;
 		bool isFirstGen() const { return m_profile.generation == Sc55Generation::First; }
 		bool isMk1() const { return isFirstGen(); }
 		bool usesSubMcu() const { return m_profile.midiFrontend == Sc55MidiFrontend::SubMcu; }
@@ -181,6 +188,9 @@ namespace emu88Lib
 		uint64_t cycles() const { return m_machine.now(); }
 
 	private:
+		struct ExecutionCloneTag {};
+		Sc55Board(Sc55RomSet _roms, bool _factoryReset, bool _wavesAlreadyDecoded);
+		explicit Sc55Board(Sc55RomSet _roms, ExecutionCloneTag);
 		void runFactoryReset();
 		// Cold boot: every chip restarts, battery RAM and the rear-panel switch are kept.
 		void powerCycle();
@@ -245,6 +255,7 @@ namespace emu88Lib
 		Sc55RomSet   m_roms;
 		Sc55DeviceProfile m_profile;
 		bool     m_valid = false;
+		bool     m_captureShell = false;
 
 		std::vector<uint8_t> m_sram = std::vector<uint8_t>(SramSize, 0);
 

@@ -76,6 +76,27 @@ namespace gpLib
 		};
 
 		explicit GP(GpConfig _config = GpConfig{});
+		// Copy only execution state. The destination retains its own ROM storage
+		// and board IRQ callback; cached ROM pointers are rebound below.
+		bool copyRuntimeFrom(const GP& source)
+		{
+			if(m_config.chipClockHz != source.m_config.chipClockHz ||
+			   m_config.saturatingFilter != source.m_config.saturatingFilter) return false;
+			for(size_t bank = 0; bank < BankCount; ++bank)
+				if(m_waveRom[bank].size() != source.m_waveRom[bank].size()) return false;
+			m_regs = source.m_regs;
+			m_tvAddLow = source.m_tvAddLow;
+			m_tvWrite = source.m_tvWrite;
+			m_bankMask = source.m_bankMask;
+			m_bankShift = source.m_bankShift;
+			m_dacOut = source.m_dacOut;
+			m_emitted = source.m_emitted;
+			m_dacPhase = source.m_dacPhase;
+			m_irqLevel = source.m_irqLevel;
+			for(size_t bank = 0; bank < BankCount; ++bank)
+				m_bankData[bank] = source.m_bankData[bank] ? m_waveRom[bank].data() : nullptr;
+			return true;
+		}
 
 		// Clears every register and the working state; installed wave ROMs
 		// survive, as they would a chip reset.

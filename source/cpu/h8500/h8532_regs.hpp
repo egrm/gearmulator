@@ -24,6 +24,9 @@ class Pwm532 final : public Device {
 
   void map(emu::IoMux& mux);
   void reset();
+  void copy_runtime_from(const Pwm532& source) {
+    for (unsigned i = 0; i < kChannels; ++i) c_[i] = source.c_[i];
+  }
 
   u8 read8(u32 addr) override;
   void write8(u32 addr, u8 value) override;
@@ -45,6 +48,13 @@ class SysRegs532 final : public Device {
 
   void map(emu::IoMux& mux);
   void reset();
+  void copy_runtime_from(const SysRegs532& source) {
+    wcr_ = source.wcr_;
+    ramcr_ = source.ramcr_;
+    sbycr_ = source.sbycr_;
+    p1cr_ = source.p1cr_;
+    // cfg_, intc_ and the RAM-enable hook belong to this destination.
+  }
 
   u8 read8(u32 addr) override;
   void write8(u32 addr, u8 value) override;

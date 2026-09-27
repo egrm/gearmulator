@@ -137,6 +137,14 @@ public:
 
     Sc55SubMcu();
 
+    // The destination's board hooks are constructor wiring and must not be
+    // copied from the live source into a private capture board.
+    void copyRuntimeFrom(const Sc55SubMcu& source)
+    {
+        m_s = source.m_s;
+        m_hostWrote = source.m_hostWrote;
+    }
+
     void setHooks(const Hooks& h) { m_hooks = h; }
 
     // Reset and wait for the main MCU's boot handshake.
