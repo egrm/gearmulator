@@ -10,6 +10,8 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
+#include <tuple>
 
 using namespace emu88Lib;
 
@@ -18,6 +20,14 @@ namespace emu88Lib
 struct Sc88ExecutionProbe
 {
     static const std::vector<uint8_t>& ram(const Sc88& board) { return board.m_sram; }
+    static const xpLib::XP& xp(const Sc88& board) { return board.m_xp; }
+    static uint64_t cycleTarget(const Sc88& board) { return board.m_cycleTarget; }
+    static uint32_t cycleFraction(const Sc88& board) { return board.m_cycleFrac; }
+    static uint32_t pc(const Sc88& board)
+    {
+        const auto& cpu=board.m_machine.cpu();
+        return cpu.code_addr(cpu.regs().pc);
+    }
     static void seed(Sc88& board, const std::vector<uint8_t>& image)
     {
         if(board.m_samplesRendered != 0) throw std::runtime_error("seed needs fresh board");
@@ -148,6 +158,251 @@ bool comparePcm(const std::vector<Sc88::SampleFrame>& left,
     return differing==0;
 }
 
+bool sameVoice(const xpLib::XP::VoiceState& a, const xpLib::XP::VoiceState& b)
+{
+    return std::tie(a.waveControl_0000,a.sampleCurrent_0100,a.sampleLoop_0200,
+                    a.sampleEnd_0300,a.waveFetchState_0400,a.waveCircularBuffer_0800,
+                    a.dpcmAccumulator_0c00,a.pitchIncrement_0d00,a.addressFraction_0e00,
+                    a.playbackStateConfig_1000,a.tvfQDestination_1100,a.pitchDestination_1200,
+                    a.tvfFDestination_1300,a.ampModDestination_1400,a.ampDestination_1500,
+                    a.tvfQRamp_1600,a.pitchRamp_1700,a.tvfFRamp_1800,a.ampModRamp_1900,
+                    a.ampRamp_1a00,a.pitchCurrent_1b00,a.tvfFCurrent_1c00,
+                    a.ampModCurrent_1d00,a.ampCurrent_1e00,a.filterConfig_2000,
+                    a.tvfQCurrent_2100,a.tvfFCoefficient_2200,a.combinedAmp_2300,
+                    a.pitchStep_2400,a.tvfFStep_2500,a.ampStep_2600,a.tvaGain_2700,
+                    a.filterBp_2800,a.filterLp_2900,a.filterOutput_2a00,a.mixer_3a00,
+                    a.resetState_3900.released,a.resetState_3900.shadow,
+                    a.runtimeCache.ampCurve2EntryPending,a.runtimeCache.runtimePhase,
+                    a.runtimeCache.waveSampleFormat)
+        == std::tie(b.waveControl_0000,b.sampleCurrent_0100,b.sampleLoop_0200,
+                    b.sampleEnd_0300,b.waveFetchState_0400,b.waveCircularBuffer_0800,
+                    b.dpcmAccumulator_0c00,b.pitchIncrement_0d00,b.addressFraction_0e00,
+                    b.playbackStateConfig_1000,b.tvfQDestination_1100,b.pitchDestination_1200,
+                    b.tvfFDestination_1300,b.ampModDestination_1400,b.ampDestination_1500,
+                    b.tvfQRamp_1600,b.pitchRamp_1700,b.tvfFRamp_1800,b.ampModRamp_1900,
+                    b.ampRamp_1a00,b.pitchCurrent_1b00,b.tvfFCurrent_1c00,
+                    b.ampModCurrent_1d00,b.ampCurrent_1e00,b.filterConfig_2000,
+                    b.tvfQCurrent_2100,b.tvfFCoefficient_2200,b.combinedAmp_2300,
+                    b.pitchStep_2400,b.tvfFStep_2500,b.ampStep_2600,b.tvaGain_2700,
+                    b.filterBp_2800,b.filterLp_2900,b.filterOutput_2a00,b.mixer_3a00,
+                    b.resetState_3900.released,b.resetState_3900.shadow,
+                    b.runtimeCache.ampCurve2EntryPending,b.runtimeCache.runtimePhase,
+                    b.runtimeCache.waveSampleFormat);
+}
+
+void reportVoiceFields(const xpLib::XP::VoiceState& a,
+                       const xpLib::XP::VoiceState& b, const char* phase, size_t voice)
+{
+    const auto scalar=[&](const char* name, auto left, auto right)
+    {
+        if(left==right) return;
+        std::cout << phase << " XP-voice=" << voice << " field=" << name
+                  << " adapter=" << static_cast<int64_t>(left)
+                  << " native=" << static_cast<int64_t>(right) << '\n';
+    };
+    const auto array=[&](const char* name, const auto& left, const auto& right)
+    {
+        size_t changed{}, first{};
+        for(size_t index{};index<left.size();++index)
+            if(left[index]!=right[index])
+            {
+                if(changed==0) first=index;
+                ++changed;
+            }
+        if(changed)
+            std::cout << phase << " XP-voice=" << voice << " field=" << name
+                      << " differing-elements=" << changed << " first=" << first << '\n';
+    };
+    scalar("waveControl_0000",a.waveControl_0000,b.waveControl_0000);
+    scalar("sampleCurrent_0100",a.sampleCurrent_0100,b.sampleCurrent_0100);
+    scalar("sampleLoop_0200",a.sampleLoop_0200,b.sampleLoop_0200);
+    scalar("sampleEnd_0300",a.sampleEnd_0300,b.sampleEnd_0300);
+    scalar("waveFetchState_0400",a.waveFetchState_0400,b.waveFetchState_0400);
+    array("waveCircularBuffer_0800",a.waveCircularBuffer_0800,b.waveCircularBuffer_0800);
+    scalar("dpcmAccumulator_0c00",a.dpcmAccumulator_0c00,b.dpcmAccumulator_0c00);
+    scalar("pitchIncrement_0d00",a.pitchIncrement_0d00,b.pitchIncrement_0d00);
+    scalar("addressFraction_0e00",a.addressFraction_0e00,b.addressFraction_0e00);
+    scalar("playbackStateConfig_1000",a.playbackStateConfig_1000,b.playbackStateConfig_1000);
+    scalar("tvfQDestination_1100",a.tvfQDestination_1100,b.tvfQDestination_1100);
+    scalar("pitchDestination_1200",a.pitchDestination_1200,b.pitchDestination_1200);
+    scalar("tvfFDestination_1300",a.tvfFDestination_1300,b.tvfFDestination_1300);
+    scalar("ampModDestination_1400",a.ampModDestination_1400,b.ampModDestination_1400);
+    scalar("ampDestination_1500",a.ampDestination_1500,b.ampDestination_1500);
+    scalar("tvfQRamp_1600",a.tvfQRamp_1600,b.tvfQRamp_1600);
+    scalar("pitchRamp_1700",a.pitchRamp_1700,b.pitchRamp_1700);
+    scalar("tvfFRamp_1800",a.tvfFRamp_1800,b.tvfFRamp_1800);
+    scalar("ampModRamp_1900",a.ampModRamp_1900,b.ampModRamp_1900);
+    scalar("ampRamp_1a00",a.ampRamp_1a00,b.ampRamp_1a00);
+    scalar("pitchCurrent_1b00",a.pitchCurrent_1b00,b.pitchCurrent_1b00);
+    scalar("tvfFCurrent_1c00",a.tvfFCurrent_1c00,b.tvfFCurrent_1c00);
+    scalar("ampModCurrent_1d00",a.ampModCurrent_1d00,b.ampModCurrent_1d00);
+    scalar("ampCurrent_1e00",a.ampCurrent_1e00,b.ampCurrent_1e00);
+    scalar("filterConfig_2000",a.filterConfig_2000,b.filterConfig_2000);
+    scalar("tvfQCurrent_2100",a.tvfQCurrent_2100,b.tvfQCurrent_2100);
+    scalar("tvfFCoefficient_2200",a.tvfFCoefficient_2200,b.tvfFCoefficient_2200);
+    scalar("combinedAmp_2300",a.combinedAmp_2300,b.combinedAmp_2300);
+    scalar("pitchStep_2400",a.pitchStep_2400,b.pitchStep_2400);
+    scalar("tvfFStep_2500",a.tvfFStep_2500,b.tvfFStep_2500);
+    scalar("ampStep_2600",a.ampStep_2600,b.ampStep_2600);
+    scalar("tvaGain_2700",a.tvaGain_2700,b.tvaGain_2700);
+    scalar("filterBp_2800",a.filterBp_2800,b.filterBp_2800);
+    scalar("filterLp_2900",a.filterLp_2900,b.filterLp_2900);
+    scalar("filterOutput_2a00",a.filterOutput_2a00,b.filterOutput_2a00);
+    array("mixer_3a00",a.mixer_3a00,b.mixer_3a00);
+    scalar("reset-released",a.resetState_3900.released,b.resetState_3900.released);
+    scalar("reset-shadow",a.resetState_3900.shadow,b.resetState_3900.shadow);
+    scalar("curve2-pending",a.runtimeCache.ampCurve2EntryPending,
+           b.runtimeCache.ampCurve2EntryPending);
+    scalar("runtime-phase",a.runtimeCache.runtimePhase,b.runtimeCache.runtimePhase);
+    scalar("wave-sample-format",a.runtimeCache.waveSampleFormat,
+           b.runtimeCache.waveSampleFormat);
+}
+
+bool sameDsp(const xpLib::DspState& a, const xpLib::DspState& b)
+{
+    for(size_t index{};index<a.pendingEramReads.size();++index)
+        if(a.pendingEramReads[index].countdown!=b.pendingEramReads[index].countdown ||
+           a.pendingEramReads[index].value!=b.pendingEramReads[index].value) return false;
+    return std::tie(a.accumulator,a.iramReadLatch,a.multiplyResultLatch,
+                    a.multiplyFeedbackLatch,a.eramReadLatch,a.eramPendingWriteValue,
+                    a.iram3ParameterLatch,a.eramIndexedOffset,a.eramPrefixPending,
+                    a.eramPendingWrite,a.eramOffsetHigh,a.iramSelPhase,
+                    a.multiplyNegativeFraction,a.eramPos,a.outputWordPosition,
+                    a.dacPortPosition,a.outputPins,a.mixerInitialized,
+                    a.serialInputNode,a.serialInputCount,a.serialInputIndex,
+                    a.serialOutputCount,a.serialInput,a.serialOutput,
+                    a.iram1,a.iram2,a.iram3,a.eram)
+        == std::tie(b.accumulator,b.iramReadLatch,b.multiplyResultLatch,
+                    b.multiplyFeedbackLatch,b.eramReadLatch,b.eramPendingWriteValue,
+                    b.iram3ParameterLatch,b.eramIndexedOffset,b.eramPrefixPending,
+                    b.eramPendingWrite,b.eramOffsetHigh,b.iramSelPhase,
+                    b.multiplyNegativeFraction,b.eramPos,b.outputWordPosition,
+                    b.dacPortPosition,b.outputPins,b.mixerInitialized,
+                    b.serialInputNode,b.serialInputCount,b.serialInputIndex,
+                    b.serialOutputCount,b.serialInput,b.serialOutput,
+                    b.iram1,b.iram2,b.iram3,b.eram);
+}
+
+bool sameXp(const xpLib::XP::State& a, const xpLib::XP::State& b)
+{
+    for(size_t voice{};voice<a.voices.size();++voice)
+        if(!sameVoice(a.voices[voice],b.voices[voice])) return false;
+    if(!sameDsp(a.dsp.state(),b.dsp.state())) return false;
+    if(a.dsp.program().pram!=b.dsp.program().pram ||
+       a.dsp.program().cram!=b.dsp.program().cram) return false;
+    return std::tie(a.readbackLatch,a.wideWriteLatch,a.highestVoice,a.irqStatus,
+                    a.irqConfigMask,a.irqAcknowledge,a.irqBlockedEvent,
+                    a.waveRomConfig,a.waveRomPage,a.waveRomBank,a.serialAudioConfig,
+                    a.diagnosticSelect_3930,a.serialFormat_3932,a.voiceWindowSelect_3934,
+                    a.dspControl,a.iram3RampRates,a.sampleClock,a.interrupt)
+        == std::tie(b.readbackLatch,b.wideWriteLatch,b.highestVoice,b.irqStatus,
+                    b.irqConfigMask,b.irqAcknowledge,b.irqBlockedEvent,
+                    b.waveRomConfig,b.waveRomPage,b.waveRomBank,b.serialAudioConfig,
+                    b.diagnosticSelect_3930,b.serialFormat_3932,b.voiceWindowSelect_3934,
+                    b.dspControl,b.iram3RampRates,b.sampleClock,b.interrupt);
+}
+
+void reportMachineDifferences(const Sc88& left, const Sc88& right, const char* phase)
+{
+    const auto& a=Sc88ExecutionProbe::ram(left);
+    const auto& b=Sc88ExecutionProbe::ram(right);
+    size_t ramDifferences{};
+    std::array<size_t,16> perPage{};
+    for(size_t address{};address<a.size();++address)
+        if(a[address]!=b[address])
+        {
+            ++ramDifferences;
+            ++perPage[address>>12];
+        }
+    std::cout << phase << " SRAM-differences=" << ramDifferences
+              << " samples=" << Sc88ExecutionProbe::samples(left)
+              << '/' << Sc88ExecutionProbe::samples(right)
+              << " cycles=" << left.cycles() << '/' << right.cycles()
+              << " targets=" << Sc88ExecutionProbe::cycleTarget(left)
+              << '/' << Sc88ExecutionProbe::cycleTarget(right)
+              << " fractions=" << Sc88ExecutionProbe::cycleFraction(left)
+              << '/' << Sc88ExecutionProbe::cycleFraction(right) << '\n';
+    for(size_t page{};page<perPage.size();++page)
+        if(perPage[page])
+            std::cout << phase << " SRAM-page=" << std::hex << page << std::dec
+                      << " differing-bytes=" << perPage[page] << '\n';
+    size_t namedHighBytes{};
+    for(size_t address=0xd000;address<0xf000 && namedHighBytes<128;++address)
+        if(a[address]!=b[address])
+        {
+            std::cout << phase << " SRAM-offset=" << std::hex << address
+                      << " adapter=" << unsigned(a[address])
+                      << " native=" << unsigned(b[address]) << std::dec << '\n';
+            ++namedHighBytes;
+        }
+    constexpr std::array dirtyTargets{
+        size_t{0xc5a0},size_t{0xc560},size_t{0xc520},
+        size_t{0xc4e0},size_t{0xc5e0},size_t{0xc620}};
+    for(const auto base : dirtyTargets)
+    {
+        size_t differentParts{};
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto address=base+2*part;
+            differentParts += a[address]!=b[address] || a[address+1]!=b[address+1];
+        }
+        std::cout << phase << " dirty-target=" << std::hex << base << std::dec
+                  << " differing-parts=" << differentParts << '\n';
+    }
+    size_t receiveSwitchParts{}, voiceSwitchParts{}, partSettingParts{}, receiverParts{};
+    for(size_t part{};part<g_partCount;++part)
+    {
+        const auto base=(part<g_groupSize ? size_t{0x8088} : size_t{0x9588})+
+                        (part%g_groupSize)*0x70;
+        receiveSwitchParts += a[base+2]!=b[base+2] || a[base+3]!=b[base+3];
+        voiceSwitchParts += ((a[base+5]^b[base+5])&0x80) != 0;
+        partSettingParts += a[base+8]!=b[base+8] || a[base+9]!=b[base+9] ||
+                            a[base+26]!=b[base+26] || a[base+27]!=b[base+27];
+        for(const auto& field : g_receivers)
+        {
+            const auto address=field.address+2*part;
+            receiverParts += !std::equal(a.begin()+address,a.begin()+address+field.bytes,
+                                         b.begin()+address);
+        }
+    }
+    std::cout << phase << " receive-switch-parts=" << receiveSwitchParts
+              << " voice-switch-bit7-parts=" << voiceSwitchParts
+              << " part-setting-parts=" << partSettingParts
+              << " receiver-field-parts=" << receiverParts << '\n';
+    const auto& ax=Sc88ExecutionProbe::xp(left).state();
+    const auto& bx=Sc88ExecutionProbe::xp(right).state();
+    size_t voiceDifferences{};
+    for(size_t voice{};voice<ax.voices.size();++voice)
+    {
+        const auto& av=ax.voices[voice];
+        const auto& bv=bx.voices[voice];
+        if(sameVoice(av,bv)) continue;
+        ++voiceDifferences;
+        reportVoiceFields(av,bv,phase,voice);
+    }
+    const auto& ad=ax.dsp.state();
+    const auto& bd=bx.dsp.state();
+    size_t iramDifferences{}, eramDifferences{};
+    for(size_t slot{};slot<ad.iram1.size();++slot)
+        iramDifferences += ad.iram1[slot]!=bd.iram1[slot] ||
+                           ad.iram2[slot]!=bd.iram2[slot] ||
+                           ad.iram3[slot]!=bd.iram3[slot];
+    for(size_t slot{};slot<ad.eram.size();++slot)
+        eramDifferences += ad.eram[slot]!=bd.eram[slot];
+    std::cout << phase << " XP-clocks=" << ax.sampleClock << '/' << bx.sampleClock
+              << " full-XP-state-equal=" << sameXp(ax,bx)
+              << " voice-differences=" << voiceDifferences
+              << " DSP-state-equal=" << sameDsp(ad,bd)
+              << " DSP-PRAM-equal=" << (ax.dsp.program().pram==bx.dsp.program().pram)
+              << " DSP-CRAM-equal=" << (ax.dsp.program().cram==bx.dsp.program().cram)
+              << " DSP-IRAM-slots=" << iramDifferences
+              << " DSP-ERAM-words=" << eramDifferences
+              << " DSP-ERAM-positions=" << ad.eramPos << '/' << bd.eramPos
+              << " DSP-accumulator=" << ad.accumulator << '/' << bd.accumulator
+              << " DSP-multiply-latch=" << ad.multiplyResultLatch
+              << '/' << bd.multiplyResultLatch << '\n';
+}
+
 void reportRamDifferences(const std::vector<uint8_t>& before,
                           const std::vector<uint8_t>& after, const char* phase)
 {
@@ -169,7 +424,7 @@ void reportRamDifferences(const std::vector<uint8_t>& before,
     std::cout << '\n';
 }
 
-bool exercise(Model model)
+bool exercise(Model model, bool isolateHistory)
 {
     using Result = Sc88Settings::Result;
     auto romAsset = RomLoader::findROM(model);
@@ -196,7 +451,7 @@ bool exercise(Model model)
     std::cout << "model=" << static_cast<int>(model)
               << " captured-C072=" << unsigned(image[g_preference]) << '\n';
 
-    for(uint8_t savedPreference : {uint8_t{0},uint8_t{1}})
+    if(!isolateHistory) for(uint8_t savedPreference : {uint8_t{0},uint8_t{1}})
     {
         currentPreference = savedPreference;
         auto variant = image;
@@ -241,6 +496,17 @@ bool exercise(Model model)
             auto replayed = std::make_unique<Sc88>(rom,waves,model,false);
             auto replayImage = variant;
             replayImage[g_preference]=1;
+            // Independent native replay starts with the same fresh transient
+            // timer/accumulator policy, without invoking the settings adapter.
+            const auto replayMeter=model==Model::Sc88 ? size_t{0x5444} : size_t{0x5448};
+            const auto replayAccumulator=model==Model::Sc88 ? size_t{0xf5ea} : size_t{0xf5fe};
+            const auto replayOwner=model==Model::Sc88 ? size_t{0xeade} : size_t{0xeaf2};
+            const auto& replayFresh=Sc88ExecutionProbe::ram(*replayed);
+            std::copy_n(replayFresh.begin()+replayMeter,32,replayImage.begin()+replayMeter);
+            std::copy_n(replayFresh.begin()+replayAccumulator,2,
+                        replayImage.begin()+replayAccumulator);
+            for(size_t voice{};voice<64;++voice)
+                replayImage[replayOwner+2*voice]=replayFresh[replayOwner+2*voice];
             Sc88ExecutionProbe::seed(*replayed,replayImage);
             run(*replayed,g_bootSamples);
             if(Sc88ExecutionProbe::ram(*replayed)[g_gate]!=1)
@@ -259,6 +525,93 @@ bool exercise(Model model)
                   "idle PCM matches independent native replay");
             if(Sc88ExecutionProbe::samples(*restored)!=Sc88ExecutionProbe::samples(*replayed))
                 throw std::runtime_error("native replay and adapter note timelines differ");
+            if(model==Model::Sc88VL)
+            {
+                reportMachineDifferences(*restored,*replayed,
+                                         "VL adapter/native postsettle");
+                auto noOpNative=replayed->cloneExecution();
+                auto quietNative=replayed->cloneExecution();
+                if(!noOpNative || !quietNative)
+                    throw std::runtime_error("native no-op replay control clone failed");
+                std::vector<Sc88::SampleFrame> noOpIdle, quietIdle;
+                editNativeReceivers(*noOpNative,false,&noOpIdle);
+                for(size_t sample{};sample<g_drainSamples;++sample)
+                    quietIdle.push_back(quietNative->renderSample());
+                comparePcm(noOpIdle,quietIdle,"VL native no-op replay idle");
+                check(receiverDifferences(Sc88ExecutionProbe::ram(*quietNative),
+                                          Sc88ExecutionProbe::ram(*noOpNative))==0,
+                      "native no-op replay preserves mapped receivers");
+                send(*noOpNative,0,0x90,60,100);
+                send(*quietNative,0,0x90,60,100);
+                std::vector<Sc88::SampleFrame> noOpNote, quietNote;
+                for(size_t sample{};sample<g_sampleRate;++sample)
+                {
+                    noOpNote.push_back(noOpNative->renderSample());
+                    quietNote.push_back(quietNative->renderSample());
+                }
+                comparePcm(noOpNote,quietNote,"VL native no-op replay future note");
+                auto traceAdapter=restored->cloneExecution();
+                auto traceNative=replayed->cloneExecution();
+                if(!traceAdapter || !traceNative)
+                    throw std::runtime_error("native replay trace clone failed");
+                send(*traceAdapter,0,0x90,60,100);
+                send(*traceNative,0,0x90,60,100);
+                bool firstMismatchFound=false, firstStateMismatchFound=false;
+                std::array<bool,8> firstFieldMismatch{};
+                for(size_t sample{};sample<g_sampleRate;++sample)
+                {
+                    const auto adapterFrame=traceAdapter->renderSample();
+                    const auto nativeFrame=traceNative->renderSample();
+                    const auto& av=Sc88ExecutionProbe::xp(*traceAdapter).state().voices.back();
+                    const auto& nv=Sc88ExecutionProbe::xp(*traceNative).state().voices.back();
+                    const std::array<std::pair<const char*,std::pair<uint32_t,uint32_t>>,8> fields{{
+                        {"sampleEnd_0300",{av.sampleEnd_0300,nv.sampleEnd_0300}},
+                        {"tvfFDestination_1300",{av.tvfFDestination_1300,nv.tvfFDestination_1300}},
+                        {"tvfFRamp_1800",{av.tvfFRamp_1800,nv.tvfFRamp_1800}},
+                        {"tvfFCurrent_1c00",{av.tvfFCurrent_1c00,nv.tvfFCurrent_1c00}},
+                        {"tvfFCoefficient_2200",{av.tvfFCoefficient_2200,nv.tvfFCoefficient_2200}},
+                        {"tvfFStep_2500",{av.tvfFStep_2500,nv.tvfFStep_2500}},
+                        {"filterBp_2800",{av.filterBp_2800,nv.filterBp_2800}},
+                        {"filterLp_2900",{av.filterLp_2900,nv.filterLp_2900}},
+                    }};
+                    for(size_t field{};field<fields.size();++field)
+                    {
+                        if(firstFieldMismatch[field] ||
+                           fields[field].second.first==fields[field].second.second) continue;
+                        firstFieldMismatch[field]=true;
+                        std::cout << "VL first-voice63-field-divergence frame=" << sample
+                                  << " field=" << fields[field].first
+                                  << " adapter/native=" << fields[field].second.first
+                                  << '/' << fields[field].second.second
+                                  << " pc=" << std::hex
+                                  << Sc88ExecutionProbe::pc(*traceAdapter) << '/'
+                                  << Sc88ExecutionProbe::pc(*traceNative) << std::dec
+                                  << " cycles=" << traceAdapter->cycles() << '/'
+                                  << traceNative->cycles() << '\n';
+                    }
+                    if(!firstStateMismatchFound &&
+                       !sameXp(Sc88ExecutionProbe::xp(*traceAdapter).state(),
+                               Sc88ExecutionProbe::xp(*traceNative).state()))
+                    {
+                        std::cout << "VL adapter/native first-XP-state mismatch-frame="
+                                  << sample << '\n';
+                        reportMachineDifferences(*traceAdapter,*traceNative,
+                                                 "VL adapter/native first XP-state mismatch");
+                        firstStateMismatchFound=true;
+                    }
+                    if(adapterFrame!=nativeFrame)
+                    {
+                        std::cout << "VL adapter/native first-note mismatch-frame="
+                                  << sample << '\n';
+                        reportMachineDifferences(*traceAdapter,*traceNative,
+                                                 "VL adapter/native first mismatch");
+                        firstMismatchFound=true;
+                        break;
+                    }
+                }
+                if(!firstMismatchFound)
+                    std::cout << "VL adapter/native note trace exact\n";
+            }
             auto noNote=restored->cloneExecution();
             if(!noNote) throw std::runtime_error("no-note continuation clone rejected");
             send(*restored,0,0x90,60,100);
@@ -313,18 +666,91 @@ bool exercise(Model model)
         throw std::runtime_error("aligned capture size invalid");
     check(Sc88ExecutionProbe::samples(*noSourceNote)==Sc88ExecutionProbe::samples(*live),
           "active and no-note source sample boundaries align");
-    reportRamDifferences(alignedSilentImage,activeImage,"aligned no-note to active image");
+    if(isolateHistory)
+        reportRamDifferences(alignedSilentImage,activeImage,"aligned no-note to active image");
     auto preNoteRestored=std::make_unique<Sc88>(rom,waves,model,false);
     auto activeRestored=std::make_unique<Sc88>(rom,waves,model,false);
+    const auto meterBase=model==Model::Sc88 ? size_t{0x5444} : size_t{0x5448};
+    const auto accumulatorBase=model==Model::Sc88 ? size_t{0xf5ea} : size_t{0xf5fe};
+    const auto voiceOwnerBase=model==Model::Sc88 ? size_t{0xeade} : size_t{0xeaf2};
+    const auto freshPreRam=Sc88ExecutionProbe::ram(*preNoteRestored);
+    const auto freshActiveRam=Sc88ExecutionProbe::ram(*activeRestored);
+    const auto savedSilentImage=alignedSilentImage;
+    const auto savedActiveImage=activeImage;
     check(Sc88Settings::restore(*preNoteRestored,alignedSilentImage)==Result::Success,
           "restore aligned no-note settings reference");
     check(Sc88Settings::restore(*activeRestored,activeImage)==Result::Success,
           "restore active-note settings image");
     check(Sc88ExecutionProbe::samples(*preNoteRestored)==Sc88ExecutionProbe::samples(*activeRestored),
           "pre-note and active-image restore timelines align");
-    reportRamDifferences(Sc88ExecutionProbe::ram(*preNoteRestored),
-                         Sc88ExecutionProbe::ram(*activeRestored),
-                         "fresh restored pre-note to active RAM");
+    check(alignedSilentImage==savedSilentImage && activeImage==savedActiveImage,
+          "restore leaves captured images unchanged");
+    const auto& preRam=Sc88ExecutionProbe::ram(*preNoteRestored);
+    const auto& activeRam=Sc88ExecutionProbe::ram(*activeRestored);
+    size_t regeneratedCountdowns{}, regeneratedAccumulatorBytes{}, activeHistoryDifferences{};
+    for(size_t offset{};offset<32;++offset)
+    {
+        regeneratedCountdowns += preRam[meterBase+offset]!=freshPreRam[meterBase+offset];
+        regeneratedCountdowns += activeRam[meterBase+offset]!=freshActiveRam[meterBase+offset];
+        activeHistoryDifferences += preRam[meterBase+offset]!=activeRam[meterBase+offset];
+    }
+    for(size_t offset{};offset<2;++offset)
+    {
+        regeneratedAccumulatorBytes +=
+            preRam[accumulatorBase+offset]!=freshPreRam[accumulatorBase+offset];
+        regeneratedAccumulatorBytes +=
+            activeRam[accumulatorBase+offset]!=freshActiveRam[accumulatorBase+offset];
+        activeHistoryDifferences +=
+            preRam[accumulatorBase+offset]!=activeRam[accumulatorBase+offset];
+    }
+    std::cout << "postboot-transient model=" << static_cast<int>(model)
+              << " countdowns-regenerated=" << regeneratedCountdowns
+              << " accumulator-bytes-regenerated=" << regeneratedAccumulatorBytes
+              << " active-reference-differences=" << activeHistoryDifferences << '\n';
+    size_t ownerDifferences{};
+    for(size_t voice{};voice<64;++voice)
+    {
+        const auto address=voiceOwnerBase+2*voice;
+        ownerDifferences += preRam[address]!=activeRam[address];
+    }
+    std::cout << "postboot-owner model=" << static_cast<int>(model)
+              << " active-reference-differences=" << ownerDifferences << '\n';
+    for(size_t offset{};offset<34;++offset)
+    {
+        const auto address=offset<32 ? meterBase+offset : accumulatorBase+offset-32;
+        if(preRam[address]==freshPreRam[address] &&
+           activeRam[address]==freshActiveRam[address] &&
+           preRam[address]==activeRam[address]) continue;
+        std::cout << "postboot-byte model=" << static_cast<int>(model)
+                  << " address=" << std::hex << address << std::dec
+                  << " fresh=" << unsigned(freshPreRam[address])
+                  << " pre=" << unsigned(preRam[address])
+                  << " active=" << unsigned(activeRam[address]) << '\n';
+    }
+    bool settingsRetained=activeRam[g_volume]==activeImage[g_volume] &&
+                          activeRam[g_preference]==activeImage[g_preference];
+    for(const auto& field : g_receivers)
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto address=field.address+2*part;
+            settingsRetained &= std::equal(activeImage.begin()+address,
+                                           activeImage.begin()+address+field.bytes,
+                                           activeRam.begin()+address);
+        }
+    for(size_t part{};part<g_partCount;++part)
+    {
+        // Both ROMs build 16 A and 16 B records of 0x70 bytes; their
+        // native CC7/CC10 writers store level/pan at record +8/+9.
+        const auto base=(part<g_groupSize ? size_t{0x8088} : size_t{0x9588})+
+                        (part%g_groupSize)*0x70;
+        settingsRetained &= activeRam[base+8]==activeImage[base+8] &&
+                            activeRam[base+9]==activeImage[base+9];
+    }
+    check(settingsRetained,"active-image native settings survive history normalization");
+    if(isolateHistory)
+        reportRamDifferences(Sc88ExecutionProbe::ram(*preNoteRestored),
+                             Sc88ExecutionProbe::ram(*activeRestored),
+                             "fresh restored pre-note to active RAM");
     auto immediatePre=preNoteRestored->cloneExecution();
     auto immediateActive=activeRestored->cloneExecution();
     if(!immediatePre || !immediateActive)
@@ -352,8 +778,12 @@ bool exercise(Model model)
     }
     check(!comparePcm(preImmediate,silentImmediate,"immediate note vs no-note"),
           "immediate first note changes PCM");
-    check(comparePcm(activeImmediate,preImmediate,"active-image immediate-note exact-PCM"),
-          "active-image immediate first note matches pre-note reference");
+    const auto activeMatches=comparePcm(activeImmediate,preImmediate,
+                                        "active-image immediate-note exact-PCM");
+    if(!isolateHistory)
+        check(activeMatches,"active-image immediate first note matches pre-note reference");
+    else if(activeMatches)
+        std::cout << "history isolation: no defect reproduced after normalization\n";
     // Diagnostic only: isolate separately the native note/voice runtime tail
     // and the timer-decremented 33-byte panel activity block. These broad
     // substitutions must not become production policy without writer audits.
@@ -380,10 +810,125 @@ bool exercise(Model model)
     auto noVoiceOrTimerHistory=noVoiceHistory;
     std::copy(alignedSilentImage.begin()+timerStart,alignedSilentImage.begin()+timerEnd,
               noVoiceOrTimerHistory.begin()+timerStart);
-    diagnosticNote(noVoiceHistory,"diagnostic replace DA00..FFFF");
-    diagnosticNote(noTimerHistory,"diagnostic replace panel timer block");
-    diagnosticNote(noVoiceOrTimerHistory,"diagnostic replace voice and timer blocks");
+    if(isolateHistory)
+    {
+        const auto ownerExact = [&](const std::vector<uint8_t>& candidateImage)
+        {
+            auto candidate=std::make_unique<Sc88>(rom,waves,model,false);
+            if(Sc88Settings::restore(*candidate,candidateImage)!=Result::Success)
+                throw std::runtime_error("independent voice-owner candidate rejected");
+            send(*candidate,0,0x90,72,100);
+            for(size_t sample{};sample<preImmediate.size();++sample)
+                if(candidate->renderSample()!=preImmediate[sample]) return false;
+            return true;
+        };
+        for(size_t voice{};voice<64;++voice)
+        {
+            auto variant=alignedSilentImage;
+            const auto address=voiceOwnerBase+2*voice;
+            variant[address]=variant[address]==0 ? uint8_t{0x22} : uint8_t{0};
+            const auto exact=ownerExact(variant);
+            std::cout << "independent-owner model=" << static_cast<int>(model)
+                      << " address=" << std::hex << address << std::dec
+                      << " exact=" << exact << '\n';
+            check(exact,"independent voice-owner variant matches reference");
+        }
+        diagnosticNote(noVoiceHistory,"diagnostic replace DA00..FFFF");
+        diagnosticNote(noTimerHistory,"diagnostic replace panel timer block");
+        diagnosticNote(noVoiceOrTimerHistory,"diagnostic replace voice and timer blocks");
+        std::vector<size_t> changed;
+        const auto appendChanged = [&](size_t begin, size_t end)
+        {
+            for(size_t address=begin;address<end;++address)
+                if(activeImage[address]!=alignedSilentImage[address])
+                    changed.push_back(address);
+        };
+        appendChanged(timerStart,timerEnd);
+        appendChanged(0xda00,activeImage.size());
+        const auto exactWith = [&](const std::vector<size_t>& replaced)
+        {
+            auto candidateImage=activeImage;
+            for(const auto address : replaced)
+                candidateImage[address]=alignedSilentImage[address];
+            auto candidate=std::make_unique<Sc88>(rom,waves,model,false);
+            if(Sc88Settings::restore(*candidate,candidateImage)!=Result::Success)
+                throw std::runtime_error("history isolation candidate restore failed");
+            send(*candidate,0,0x90,72,100);
+            for(size_t sample{};sample<preImmediate.size();++sample)
+                if(candidate->renderSample()!=preImmediate[sample]) return false;
+            return true;
+        };
+        const auto exactImage = [&](const std::vector<uint8_t>& candidateImage)
+        {
+            auto candidate=std::make_unique<Sc88>(rom,waves,model,false);
+            if(Sc88Settings::restore(*candidate,candidateImage)!=Result::Success)
+                throw std::runtime_error("independent history variant restore failed");
+            send(*candidate,0,0x90,72,100);
+            for(size_t sample{};sample<preImmediate.size();++sample)
+                if(candidate->renderSample()!=preImmediate[sample]) return false;
+            return true;
+        };
+        for(size_t offset{};offset<32;++offset)
+        {
+            auto variant=alignedSilentImage;
+            const auto address=meterBase+offset;
+            variant[address]=variant[address]==0 ? uint8_t{1} : uint8_t{0};
+            const auto exact=exactImage(variant);
+            std::cout << "independent-meter model=" << static_cast<int>(model)
+                      << " address=" << std::hex << address << std::dec
+                      << " exact=" << exact << '\n';
+            check(exact,"independent panel countdown variant matches reference");
+        }
+        for(size_t variantIndex{};variantIndex<3;++variantIndex)
+        {
+            auto variant=alignedSilentImage;
+            if(variantIndex!=1) variant[accumulatorBase]=0x2b;
+            if(variantIndex!=0) variant[accumulatorBase+1]=0x3d;
+            const auto exact=exactImage(variant);
+            std::cout << "independent-accumulator model=" << static_cast<int>(model)
+                      << " variant=" << variantIndex << " exact=" << exact << '\n';
+            check(exact,"independent synthesis accumulator variant matches reference");
+        }
+        if(!activeMatches)
+        {
+        if(!exactWith(changed))
+            throw std::runtime_error("history isolation precondition failed: full causal candidate does not recover exact PCM");
+        size_t granularity=2, trials{};
+        while(changed.size()>1)
+        {
+            const auto chunkSize=(changed.size()+granularity-1)/granularity;
+            bool reduced=false;
+            for(size_t first{};first<changed.size();first+=chunkSize)
+            {
+                const auto last=std::min(changed.size(),first+chunkSize);
+                auto trial=changed;
+                trial.erase(trial.begin()+first,trial.begin()+last);
+                ++trials;
+                const auto exact=exactWith(trial);
+                std::cout << "history-isolation model=" << static_cast<int>(model)
+                          << " trial=" << trials << " retained=" << trial.size()
+                          << " exact=" << exact << '\n';
+                if(!exact) continue;
+                changed=std::move(trial);
+                granularity=std::max(size_t{2},granularity-1);
+                reduced=true;
+                break;
+            }
+            if(reduced) continue;
+            if(granularity>=changed.size()) break;
+            granularity=std::min(changed.size(),granularity*2);
+        }
+        std::cout << "history-isolation model=" << static_cast<int>(model)
+                  << " one-minimal-offset-count=" << changed.size() << " offsets=";
+        for(const auto address : changed)
+            std::cout << std::hex << address << ':' << unsigned(activeImage[address])
+                      << '>' << unsigned(alignedSilentImage[address]) << ' ' << std::dec;
+        std::cout << '\n';
+        }
+    }
 
+    if(!isolateHistory)
+    {
     auto unknownRom=rom; unknownRom.back()^=1;
     auto unknown=std::make_unique<Sc88>(unknownRom,waves,model,false);
     currentPreference = 0xff;
@@ -393,6 +938,7 @@ bool exercise(Model model)
     check(Sc88Settings::capture(*unknown,sentinel)==Result::UnsupportedFirmware,
           "reject unsupported firmware capture");
     check(sentinel==std::vector<uint8_t>{42},"failed capture preserves destination");
+    }
     return good;
 }
 }
@@ -400,13 +946,16 @@ bool exercise(Model model)
 int main(int argc,char** argv)
 {
     baseLib::disableErrorDialogs();
-    if(argc!=2) return 77;
+    const bool isolateHistory=argc==3 && std::string_view(argv[2])=="--isolate-history";
+    if(argc!=2 && !isolateHistory) return 77;
     synthLib::RomLoader::setSearchPath(argv[1]);
     try
     {
         bool good=true;
-        for(const auto model : {Model::Sc88,Model::Sc88VL}) good &= exercise(model);
-        std::cout << "SC-88/VL receiver settings foundation " << (good?"passed":"failed") << '\n';
+        for(const auto model : {Model::Sc88,Model::Sc88VL}) good &= exercise(model,isolateHistory);
+        std::cout << (isolateHistory ? "SC-88/VL history isolation diagnostic "
+                                      : "SC-88/VL receiver settings foundation ")
+                  << (good?"passed":"failed") << '\n';
         return good?0:1;
     }
     catch(const std::exception& error)
