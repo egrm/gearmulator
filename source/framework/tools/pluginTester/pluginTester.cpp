@@ -120,8 +120,10 @@ int main(const int _argc, char* _argv[])
 		const auto recallModel = cmdLine.getInt("recall-model", -1);
 		const auto recallSeed = cmdLine.get("recall-seed");
 		const bool sc88Seed = recallSeed == "eq" || recallSeed == "all" || recallSeed == "eq-frequency" ||
-			recallSeed == "producer-wet" || recallSeed == "producer-dry";
-		const bool proSeed = recallSeed == "pro-system";
+			recallSeed == "producer-wet" || recallSeed == "producer-dry" ||
+			recallSeed == "producer-bank";
+		const bool proSeed = recallSeed == "pro-system" ||
+			recallSeed == "producer-pro-wet" || recallSeed == "producer-pro-dry";
 		if(!recallSeed.empty() && (!cmdLine.contains("recall-component") ||
 			!(sc88Seed && (recallModel == 0 || recallModel == 1)) &&
 			!(proSeed && recallModel == 2)))

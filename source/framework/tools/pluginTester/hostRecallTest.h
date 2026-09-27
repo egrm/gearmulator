@@ -248,7 +248,27 @@ namespace hostRecallTest
 	inline void requireSc88NativeSeed(const MemoryBlock& actual, const MemoryBlock& seed,
 		int model, const String& seedKind, const char* description)
 	{
-		if(seedKind == "producer-wet" || seedKind == "producer-dry")
+		if(seedKind == "producer-bank")
+		{
+			// SC-88/VL manuals: St.Soft EP is CC0 8, CC32 2, PC005.
+			// D820 is the accepted CC32 latch, not a proven effective map.
+			const auto part = sc88SelectedPart(seed, model);
+			require(sc88SelectedPart(actual, model) == part, description);
+			const auto primary = (part < sc88PartsPerGroup ? sc88FirstGroupBase : sc88SecondGroupBase) +
+				(part % sc88PartsPerGroup) * sc88PartRecordBytes;
+			constexpr size_t pendingBankMsbBase = 0xd860;
+			constexpr size_t pendingMapLsbBase = 0xd820;
+			require(sc88HardwareByte(seed, primary) == 8 &&
+				sc88HardwareByte(seed, primary + 1) == 4 &&
+				sc88HardwareByte(seed, pendingBankMsbBase + 2 * part) == 8 &&
+				sc88HardwareByte(seed, pendingMapLsbBase + 2 * part) == 2,
+				"Native producer bank seed committed St.Soft EP and accepted CC32 2");
+			for(const auto address : {primary, primary + 1,
+				pendingBankMsbBase + 2 * part, pendingMapLsbBase + 2 * part})
+				require(sc88HardwareByte(actual, address) == sc88HardwareByte(seed, address),
+					description);
+		}
+		else if(seedKind == "producer-wet" || seedKind == "producer-dry")
 		{
 			// docs/research/88emu-userinst-panel-procedure.md: selected
 			// secondary envelope offsets A/B/C, primary program and CC91 send.
@@ -308,6 +328,42 @@ namespace hostRecallTest
 			hardwareWord(actual, proSystemCursorAddress) == 0x10 &&
 			hardwareWord(actual, proSelectedPartAddress) == 1 &&
 			sc88HardwareByte(actual, proPreviewVelocityAddress) == 101, description);
+	}
+
+	inline size_t proProducerDescriptor(const MemoryBlock& component)
+	{
+		require(hardwareWord(component, proSelectedPartAddress) == 0,
+			"Native Pro producer seed selects A1");
+		const auto descriptor = hardwareWord(component, 0xcf7a);
+		require(descriptor > 0 && descriptor + 0x16 < 0x20000,
+			"Native Pro producer descriptor pointer is valid");
+		return descriptor;
+	}
+
+	inline void requireProProducerSound(const MemoryBlock& actual, const MemoryBlock& seed,
+		bool dry, const char* description)
+	{
+		// sc88proSoundState_probe.cpp: native A1 descriptor and envelope edits.
+		const auto descriptor = proProducerDescriptor(seed);
+		require(proProducerDescriptor(actual) == descriptor, description);
+		Logger::writeToLog("Pro producer seed kind=" + String(dry ? "dry" : "wet") +
+			" program=" + String(sc88HardwareByte(seed, descriptor + 1)) +
+			" envelope=" + String(sc88HardwareByte(seed, descriptor + 0x14)) + "," +
+			String(sc88HardwareByte(seed, descriptor + 0x15)) + "," +
+			String(sc88HardwareByte(seed, descriptor + 0x16)) +
+			" macro=" + String(sc88HardwareByte(seed, 0x506a)) +
+			" send=" + String(sc88HardwareByte(seed, descriptor + 0x0f)));
+		require(sc88HardwareByte(seed, descriptor + 1) == 4 &&
+			sc88HardwareByte(seed, descriptor + 0x14) == 0x41 &&
+			sc88HardwareByte(seed, descriptor + 0x15) == 0x41 &&
+			sc88HardwareByte(seed, descriptor + 0x16) == 0x41 &&
+			sc88HardwareByte(seed, 0x506a) == 2 &&
+			sc88HardwareByte(seed, descriptor + 0x0f) == (dry ? 0 : 1),
+			"Native Pro producer seed has edited preset, envelope and reverb settings");
+		for(const auto address : {descriptor, descriptor + 1, descriptor + 0x0f,
+			descriptor + 0x14, descriptor + 0x15, descriptor + 0x16, size_t{0x506a}})
+			require(sc88HardwareByte(actual, address) == sc88HardwareByte(seed, address),
+				description);
 	}
 
 	inline void requireHostOwnedRouting(const MemoryBlock& componentState)
@@ -420,7 +476,10 @@ namespace hostRecallTest
 			MemoryBlock nativeComponent;
 			require(File(nativeComponentPath).loadFileAsData(nativeComponent),
 				"Fresh process reads the native Pro panel source image");
-			if(seedKind == "pro-system")
+			if(seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry")
+				requireProProducerSound(componentStateFromHost(save(*restored)), nativeComponent,
+					seedKind == "producer-pro-dry", "Fresh process retains native Pro producer sound");
+			else if(seedKind == "pro-system")
 				requireProSystemContext(componentStateFromHost(save(*restored)), nativeComponent,
 					"Fresh process retains the native Pro System menu context");
 			else
@@ -482,7 +541,10 @@ namespace hostRecallTest
 					expectedModel, seedKind, "Native SC-88 panel context survives a fresh VST3 capture");
 			if(expectedModel == 2)
 			{
-				if(seedKind == "pro-system")
+				if(seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry")
+					requireProProducerSound(componentStateFromHost(saved), nativeComponent,
+						seedKind == "producer-pro-dry", "Native Pro producer sound survives a fresh VST3 capture");
+				else if(seedKind == "pro-system")
 					requireProSystemContext(componentStateFromHost(saved), nativeComponent,
 						"Native Pro System menu survives a fresh VST3 capture");
 				else
@@ -592,7 +654,10 @@ namespace hostRecallTest
 				expectedModel, seedKind, "Fresh VST3 instance restores the native SC-88 panel context");
 		if(nativeComponentPath.isNotEmpty() && expectedModel == 2)
 		{
-			if(seedKind == "pro-system")
+			if(seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry")
+				requireProProducerSound(componentStateFromHost(save(*restored)), nativeComponent,
+					seedKind == "producer-pro-dry", "Fresh VST3 instance restores native Pro producer sound");
+			else if(seedKind == "pro-system")
 				requireProSystemContext(componentStateFromHost(save(*restored)), nativeComponent,
 					"Fresh VST3 instance restores the native Pro System menu context");
 			else
@@ -617,9 +682,11 @@ namespace hostRecallTest
 		auto defaults = create(manager, description);
 		const auto defaultAudio = render(*defaults, notes, auditionBlocks);
 		require(firstAudio != defaultAudio, "Restored settings audibly differ from factory defaults");
-		if(seedKind == "producer-wet" || seedKind == "producer-dry")
+		if(seedKind == "producer-wet" || seedKind == "producer-dry" ||
+			seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry")
 		{
-			const auto otherKind = seedKind == "producer-wet" ? String("producer-dry") : String("producer-wet");
+			const auto otherKind = seedKind.replace("wet", "dry") == seedKind ?
+				seedKind.replace("dry", "wet") : seedKind.replace("wet", "dry");
 			const auto otherPath = nativeComponentPath.replace(seedKind, otherKind);
 			MemoryBlock otherNative;
 			require(otherPath != nativeComponentPath && File(otherPath).loadFileAsData(otherNative),
@@ -633,22 +700,40 @@ namespace hostRecallTest
 			(void)render(*otherSource, {}, 1);
 			const auto otherState = save(*otherSource);
 			requireModel(otherState, expectedModel);
-			requireSc88NativeSeed(componentStateFromHost(otherState), otherNative,
-				expectedModel, otherKind, "Paired producer sound survives VST3 capture");
+			if(expectedModel == 2)
+				requireProProducerSound(componentStateFromHost(otherState), otherNative,
+					otherKind == "producer-pro-dry", "Paired Pro producer sound survives VST3 capture");
+			else
+				requireSc88NativeSeed(componentStateFromHost(otherState), otherNative,
+					expectedModel, otherKind, "Paired producer sound survives VST3 capture");
 			const auto thisComponent = componentStateFromHost(saved);
 			const auto otherComponent = componentStateFromHost(otherState);
-			const auto part = sc88SelectedPart(thisComponent, expectedModel);
-			require(sc88SelectedPart(otherComponent, expectedModel) == part,
-				"Wet and dry producer states select the same internal part");
-			const auto primary = (part < sc88PartsPerGroup ? sc88FirstGroupBase : sc88SecondGroupBase) +
-				(part % sc88PartsPerGroup) * sc88PartRecordBytes;
-			const auto secondary = (part < sc88PartsPerGroup ? size_t{0x87c8} : size_t{0x9cc8}) +
-				(part % sc88PartsPerGroup) * size_t{0x20};
-			for(const auto address : {primary, primary + 1, secondary + 0x0a,
-				secondary + 0x0b, secondary + 0x0c})
-				require(sc88HardwareByte(thisComponent, address) ==
-					sc88HardwareByte(otherComponent, address),
-					"Wet and dry producer states retain identical preset and envelope bytes");
+			if(expectedModel == 2)
+			{
+				const auto descriptor = proProducerDescriptor(thisComponent);
+				require(proProducerDescriptor(otherComponent) == descriptor,
+					"Wet and dry Pro producer states select the same A1 descriptor");
+				for(const auto address : {descriptor, descriptor + 1, descriptor + 0x14,
+					descriptor + 0x15, descriptor + 0x16, size_t{0x506a}})
+					require(sc88HardwareByte(thisComponent, address) ==
+						sc88HardwareByte(otherComponent, address),
+						"Wet and dry Pro producer states retain identical preset and envelope bytes");
+			}
+			else
+			{
+				const auto part = sc88SelectedPart(thisComponent, expectedModel);
+				require(sc88SelectedPart(otherComponent, expectedModel) == part,
+					"Wet and dry producer states select the same internal part");
+				const auto primary = (part < sc88PartsPerGroup ? sc88FirstGroupBase : sc88SecondGroupBase) +
+					(part % sc88PartsPerGroup) * sc88PartRecordBytes;
+				const auto secondary = (part < sc88PartsPerGroup ? size_t{0x87c8} : size_t{0x9cc8}) +
+					(part % sc88PartsPerGroup) * size_t{0x20};
+				for(const auto address : {primary, primary + 1, secondary + 0x0a,
+					secondary + 0x0b, secondary + 0x0c})
+					require(sc88HardwareByte(thisComponent, address) ==
+						sc88HardwareByte(otherComponent, address),
+						"Wet and dry producer states retain identical preset and envelope bytes");
+			}
 			auto thisSound = create(manager, description);
 			thisSound->setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
 			auto otherSound = create(manager, description);
