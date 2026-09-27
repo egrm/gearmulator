@@ -1,6 +1,7 @@
 #include "88lib/boards/sc88Settings.h"
 #include "88lib/boards/sc88.h"
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <utility>
@@ -19,6 +20,24 @@ namespace emu88Lib
 		constexpr size_t g_batteryPreference = 0xc072;
 		constexpr size_t g_bootGate = 0xc092;
 		constexpr uint8_t g_preserveSettings = 1;
+		// SC-88 01:BBCC..BC33 and VL 01:AF94..AFFB write the 32
+		// panel-activity countdowns; 01:A6EE..A706 and 01:9A00..9A18
+		// decrement them. They are not saved sound parameters.
+		constexpr size_t g_meterCount = 32;
+		constexpr size_t g_sc88MeterStart = 0x5444;
+		constexpr size_t g_sc88vlMeterStart = 0x5448;
+		// SC-88 00:2903/290B and VL 00:2ABB/2AC3 read/update this
+		// synthesis overflow accumulator, then write a per-voice value.
+		constexpr size_t g_sc88Accumulator = 0xf5ea;
+		constexpr size_t g_sc88vlAccumulator = 0xf5fe;
+		constexpr size_t g_accumulatorBytes = sizeof(uint16_t);
+		// Voice-start handlers SC 00:220C/2210 and VL 00:23BC/23C0 write
+		// owner and note to adjacent bytes. Their 01:913B/837F meter loops
+		// scan 64 even owner offsets; neither byte is a saved part setting.
+		constexpr size_t g_sc88VoiceOwnerStart = 0xeade;
+		constexpr size_t g_sc88vlVoiceOwnerStart = 0xeaf2;
+		constexpr size_t g_voiceOwnerCount = 64;
+		constexpr size_t g_voiceOwnerStride = sizeof(uint16_t);
 		// Existing SC-88/VL real-ROM diagnostic boots for this interval. This
 		// foundation needs a model-specific readiness predicate before host use.
 		constexpr unsigned g_bootSamples = g_sampleRate * 10;
@@ -68,7 +87,21 @@ namespace emu88Lib
 		if(image.size() != Sc88::SramSize || image[g_batteryPreference] > g_preserveSettings)
 			return Result::InvalidImage;
 		if(board.m_samplesRendered != 0) return Result::RequiresFreshBoard;
+		const auto meterStart = board.m_model == Model::Sc88 ? g_sc88MeterStart : g_sc88vlMeterStart;
+		const auto accumulator = board.m_model == Model::Sc88 ? g_sc88Accumulator : g_sc88vlAccumulator;
+		const auto voiceOwner = board.m_model == Model::Sc88 ? g_sc88VoiceOwnerStart : g_sc88vlVoiceOwnerStart;
+		std::array<uint8_t,g_meterCount> freshMeters{};
+		std::array<uint8_t,g_accumulatorBytes> freshAccumulator{};
+		std::array<uint8_t,g_voiceOwnerCount> freshVoiceOwners{};
+		std::copy_n(board.m_sram.begin()+meterStart,g_meterCount,freshMeters.begin());
+		std::copy_n(board.m_sram.begin()+accumulator,g_accumulatorBytes,freshAccumulator.begin());
+		for(size_t voice{};voice<g_voiceOwnerCount;++voice)
+			freshVoiceOwners[voice] = board.m_sram[voiceOwner+voice*g_voiceOwnerStride];
 		board.m_sram = image;
+		std::copy(freshMeters.begin(),freshMeters.end(),board.m_sram.begin()+meterStart);
+		std::copy(freshAccumulator.begin(),freshAccumulator.end(),board.m_sram.begin()+accumulator);
+		for(size_t voice{};voice<g_voiceOwnerCount;++voice)
+			board.m_sram[voiceOwner+voice*g_voiceOwnerStride] = freshVoiceOwners[voice];
 		board.m_sram[g_batteryPreference] = g_preserveSettings;
 		for(unsigned sample{}; sample < g_bootSamples; ++sample) board.renderSample();
 		if(board.m_sram[g_bootGate] != g_preserveSettings) return Result::InvalidImage;
