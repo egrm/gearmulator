@@ -96,6 +96,7 @@ class Peripherals final : public SfrBlock {
   u8 hso_output() const { return u8(ios0_ & 0x3F); }
   unsigned hsi_fifo_count() const { return hsi_count_; }
   bool serial_tx_active() const { return serial_tx_active_; }
+  bool serial_input_pending() const { return serial_rx_full_; }
   bool serial_tx_line() const { return serial_tx_line_; }
   bool watchdog_enabled() const { return watchdog_enabled_; }
   void set_serial_tx_line_hook(LineHook h) { serial_tx_line_hook_ = std::move(h); }

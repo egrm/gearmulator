@@ -12,6 +12,7 @@
 #include "88lib/boards/nu10b.h"
 #include "hardwareLib/lcdfonts.h"
 #include "88lib/boards/sc55Board.h"
+#include "88lib/boards/laSettings.h"
 #include "88lib/boards/sc55Settings.h"
 #include "88lib/boards/sc88pro.h"
 #include "88lib/boards/sc88proSettings.h"
@@ -146,8 +147,20 @@ namespace emu88Lib
 		case DeviceModel::Cm32ln:
 		case DeviceModel::Mt32Old:
 		case DeviceModel::Mt32New:
-			m_la = std::make_unique<LaBoard>(RomLoader::findLaRomSet(toLaModel(m_model)));
+		{
+			auto roms = RomLoader::findLaRomSet(toLaModel(m_model));
+			if(!roms.isValid()) break;
+			const auto firmware = baseLib::MD5(roms.control).getWords();
+			if(_settings && _settings->firmware != firmware) break;
+			for(const auto* image : {&roms.control, &roms.wave, &roms.reverb})
+				m_assetDigests.push_back(baseLib::MD5(*image).getWords());
+			m_la = std::make_unique<LaBoard>(roms);
+			if(_settings && LaSettings::restore(*m_la, _settings->memory,
+				static_cast<size_t>(LaBoard::SampleRate * g_fastBootSeconds),
+				static_cast<size_t>(LaBoard::SampleRate * g_fastBootSeconds)) != LaSettings::Result::Success)
+				m_la.reset();
 			break;
+		}
 		case DeviceModel::Cm64:
 			m_cm64 = std::make_unique<Cm64>(RomLoader::findLaRomSet(LaModel::Cm32l), RomLoader::findCm32pRomSet(),
 			                                _pcmCard);
@@ -297,6 +310,10 @@ namespace emu88Lib
 			return settings.layout == Sc88Settings::LayoutVersion && settings.memory.size() == Sc88::SramSize;
 		case DeviceModel::Sc55Mk1:
 			return settings.layout == Sc55Settings::LayoutVersion && settings.memory.size() == Sc55Board::SramSize;
+		case DeviceModel::Mt32Old:
+		case DeviceModel::Mt32New:
+		case DeviceModel::Cm32l:
+			return settings.layout == LaSettings::LayoutVersion && settings.memory.size() == LaSettings::ImageBytes;
 		default:
 			return false;
 		}
@@ -321,8 +338,22 @@ namespace emu88Lib
 		initializeSc55MidiInput();
 	}
 
+	HardwareDevice::HardwareDevice(const synthLib::DeviceCreateParams& params, const DeviceModel model,
+	                               std::unique_ptr<LaBoard> board, CaptureTag)
+		: synthLib::Device(params), m_model(model), m_la(std::move(board))
+	{
+	}
+
 	std::function<std::unique_ptr<HardwareDevice>()> HardwareDevice::prepareCaptureClone() const
 	{
+		if(m_la && LaSettings::supported(*m_la))
+			return [params = getDeviceCreateParams(), model = m_model,
+			        prepareBoard = m_la->prepareExecutionClone()]() mutable
+			{
+				auto board = prepareBoard();
+				if(!board) return std::unique_ptr<HardwareDevice>{};
+				return std::unique_ptr<HardwareDevice>(new HardwareDevice(params, model, std::move(board), CaptureTag{}));
+			};
 		if(m_sc55 && Sc55Settings::supported(*m_sc55))
 			return [params = getDeviceCreateParams(), model = m_model,
 			        prepareBoard = m_sc55->prepareExecutionClone()]() mutable
@@ -353,7 +384,8 @@ namespace emu88Lib
 	bool HardwareDevice::acceptsCaptureFrom(const HardwareDevice& source) const
 	{
 		return m_model == source.m_model &&
-		       ((m_sc88Pro && source.m_sc88Pro && m_sc88Pro->acceptsExecutionFrom(*source.m_sc88Pro)) ||
+		       ((m_la && source.m_la && m_la->acceptsExecutionFrom(*source.m_la)) ||
+		        (m_sc88Pro && source.m_sc88Pro && m_sc88Pro->acceptsExecutionFrom(*source.m_sc88Pro)) ||
 		        (m_sc88 && source.m_sc88 && m_sc88->acceptsExecutionFrom(*source.m_sc88)) ||
 		        (m_sc55 && source.m_sc55 && m_sc55->acceptsExecutionFrom(*source.m_sc55)));
 	}
@@ -361,6 +393,7 @@ namespace emu88Lib
 	bool HardwareDevice::copyCaptureFrom(const HardwareDevice& source)
 	{
 		if(!acceptsCaptureFrom(source)) return false;
+		if(m_la && !m_la->copyExecutionFrom(*source.m_la)) return false;
 		if(m_sc88Pro && !m_sc88Pro->copyExecutionFrom(*source.m_sc88Pro)) return false;
 		if(m_sc88 && !m_sc88->copyExecutionFrom(*source.m_sc88)) return false;
 		if(m_sc55)
@@ -404,7 +437,8 @@ namespace emu88Lib
 	{
 		std::lock_guard lock(m_panelMutex);
 		return m_midiIn.empty() && m_panelCommands.empty() && m_pendingPanelCommands.empty() &&
-		       ((m_sc88Pro && Sc88ProSettings::isCaptureBoundary(*m_sc88Pro, true)) ||
+		       ((m_la && LaSettings::isCaptureBoundary(*m_la)) ||
+		        (m_sc88Pro && Sc88ProSettings::isCaptureBoundary(*m_sc88Pro, true)) ||
 		        (m_sc88 && Sc88Settings::isCaptureBoundary(*m_sc88, true)) ||
 		        (m_sc55 && m_sc55MidiIn && m_sc55MidiIn->isInputDrained() && Sc55Settings::isCaptureBoundary(*m_sc55)));
 	}
@@ -420,6 +454,16 @@ namespace emu88Lib
 			result.firmware = m_assetDigests.front();
 			if(Sc55Settings::capture(*m_sc55, result.memory) != Sc55Settings::Result::Success)
 				throw std::runtime_error("SC55 settings capture rejected");
+			return result;
+		}
+		if(m_la)
+		{
+			result.layout = LaSettings::LayoutVersion;
+			result.firmware = m_assetDigests.front();
+			if(LaSettings::capture(*m_la,
+				static_cast<size_t>(LaBoard::SampleRate * g_fastBootSeconds), result.memory)
+				!= LaSettings::Result::Success)
+				throw std::runtime_error("LA sound settings capture rejected");
 			return result;
 		}
 		if(m_sc88)

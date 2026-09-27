@@ -13,6 +13,7 @@ set(SOURCES
 	boards/cm32p.cpp boards/cm32p.h
 	boards/cm64.cpp boards/cm64.h
 	boards/laBoard.cpp boards/laBoard.h
+	boards/laSettings.cpp boards/laSettings.h
 	boards/miig5.cpp boards/miig5.h
 	boards/nu10b.cpp boards/nu10b.h
 	hardwareDevice.cpp hardwareDevice.h

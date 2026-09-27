@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -19,6 +20,7 @@
 
 namespace emu88Lib
 {
+	class LaSettings;
 	// The MT-32's ten front-panel switches, by matrix position. The CM-32L board reads the
 	// same matrix at power-on for its test and version screens, with nothing wired to it.
 	enum class Mt32Button : uint8_t
@@ -110,7 +112,13 @@ namespace emu88Lib
 		void transportDiscontinuity(uint32_t generation);
 		// Private, independent continuation for firmware-side settings queries.
 		// Caller must own the board exclusively between completed renderSample calls.
+		std::function<std::unique_ptr<LaBoard>()> prepareExecutionClone() const;
+		bool acceptsExecutionFrom(const LaBoard& source) const;
+		bool copyExecutionFrom(const LaBoard& source);
 		std::unique_ptr<LaBoard> cloneExecution() const;
+		// Board-side wire/panel boundary; firmware parameter agreement is checked
+		// separately by native RQ1 queries on the private execution clone.
+		bool isCaptureInputBoundary() const;
 		// RQ1/DT1 operate through the firmware UART, never by guessing its RAM map.
 		// Query runs on a private clone. Both calls fail unless every requested
 		// byte is returned with valid address and checksum inside maxSamples.
@@ -134,6 +142,7 @@ namespace emu88Lib
 		static int32_t shiftOldBoardDac(int32_t word);
 
 	private:
+		friend class LaSettings;
 		static constexpr uint32_t DirectRamBase = 0xc000, DirectRamSize = 0x4000;
 
 		// Everything on the bus that is not plain ROM or RAM.
@@ -192,5 +201,7 @@ namespace emu88Lib
 		float m_vcaGain = 0.0f;
 		std::pair<float, float> m_analogSample{};
 		bool m_valid = false;
+		bool m_captureShell = false;
+		uint64_t m_samplesRendered = 0;
 	};
 }

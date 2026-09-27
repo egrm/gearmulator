@@ -146,6 +146,8 @@ namespace emu88Lib
 		               std::unique_ptr<Sc88> board, CaptureTag);
 		HardwareDevice(const synthLib::DeviceCreateParams& params, DeviceModel model,
 		               std::unique_ptr<Sc55Board> board, CaptureTag);
+		HardwareDevice(const synthLib::DeviceCreateParams& params, DeviceModel model,
+		               std::unique_ptr<LaBoard> board, CaptureTag);
 		void initializeSc55MidiInput();
 		enum class PanelCommandType : uint8_t { Buttons, Encoder };
 		struct PanelCommand

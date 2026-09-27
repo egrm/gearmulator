@@ -1,9 +1,12 @@
 #include "88lib/boards/laBoard.h"
+#include "88lib/boards/laSettings.h"
 #include "88lib/rom/romloader.h"
+#include "baseLib/md5.h"
 #include "common/test_util.hpp"
 #include "synthLib/romLoader.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <memory>
 #include <string_view>
 
@@ -318,15 +321,27 @@ int main(int argc, char** argv)
 			auto source = std::make_unique<LaBoard>(romSet(p, model));
 			source->setKnob(300);
 			source->addMidiEvent(synthLib::SMidiEvent(synthLib::MidiEventSource::Host, 0x90, 60, 100));
+			auto prepare = source->prepareExecutionClone();
+			CHECK(static_cast<bool>(prepare));
+			if(!prepare) continue;
+			auto shell = prepare();
+			CHECK(shell && shell->acceptsExecutionFrom(*source));
+			if(!shell) continue;
+			CHECK(shell->copyExecutionFrom(*source));
+			CHECK(!shell->acceptsExecutionFrom(*source));
 			auto clone = source->cloneExecution();
 			CHECK(clone && clone->isValid());
 			if(!clone) continue;
 			CHECK_EQ(clone->knob(), source->knob());
 			for(unsigned sample = 0; sample < 200; ++sample)
 			{
-				CHECK(clone->renderSample() == source->renderSample());
+				const auto sourceFrame = source->renderSample();
+				CHECK(clone->renderSample() == sourceFrame);
+				CHECK(shell->renderSample() == sourceFrame);
 				CHECK_EQ(clone->registerByte(0x30), source->registerByte(0x30));
+				CHECK_EQ(shell->registerByte(0x30), source->registerByte(0x30));
 				CHECK(clone->dacBuses() == source->dacBuses());
+				CHECK(shell->dacBuses() == source->dacBuses());
 			}
 			CHECK_EQ(clone->registerByte(0x30), 0x90);
 			auto second = source->cloneExecution();
@@ -334,7 +349,11 @@ int main(int argc, char** argv)
 			if(!second) continue;
 			source.reset();
 			for(unsigned sample = 0; sample < 200; ++sample)
-				CHECK(clone->renderSample() == second->renderSample());
+			{
+				const auto secondFrame = second->renderSample();
+				CHECK(clone->renderSample() == secondFrame);
+				CHECK(shell->renderSample() == secondFrame);
+			}
 		}
 	}
 
@@ -352,13 +371,17 @@ int main(int argc, char** argv)
 		synthLib::RomLoader::setSearchPath(argv[2]);
 		emu88Lib::RomLoader::rescan();
 		const auto roms = emu88Lib::RomLoader::findLaRomSet(model);
+		if(roms.isValid()) std::printf("LA control MD5 %s\n", baseLib::MD5(roms.control).toString().c_str());
 		CHECK(roms.isValid());
 		if(roms.isValid())
 		{
 			constexpr uint32_t systemAddress = 0x10u << 14;
 			constexpr uint32_t patchOneAddress = 0x03u << 14;
+			constexpr uint32_t timbreOneAddress = 0x04u << 14;
 			constexpr size_t systemSoundBytes = 4;
 			constexpr size_t patchSelectionBytes = 2;
+			// Owner's Manual §5-1: common 0x0e plus four 0x3a partials.
+			constexpr size_t timbreSoundBytes = 0x0e + 4 * 0x3a;
 			constexpr size_t bootSamples = LaBoard::SampleRate * 10;
 			constexpr size_t replyBudgetSamples = LaBoard::SampleRate * 5;
 			LaBoard source(roms);
@@ -374,7 +397,12 @@ int main(int argc, char** argv)
 			CHECK(source.requestParameterBlock(systemAddress, systemSoundBytes,
 			                                   replyBudgetSamples, system));
 			CHECK(system.size() == systemSoundBytes);
-			if(patch.size() == patchSelectionBytes && system.size() == systemSoundBytes)
+			std::vector<uint8_t> timbre;
+			CHECK(source.requestParameterBlock(timbreOneAddress, timbreSoundBytes,
+			                                   replyBudgetSamples, timbre));
+			CHECK(timbre.size() == timbreSoundBytes);
+			if(patch.size() == patchSelectionBytes && system.size() == systemSoundBytes &&
+			   timbre.size() == timbreSoundBytes)
 			{
 				// One audible reverb level edit through the firmware's own DT1 handler.
 				system.back() = system.back() == 0 ? 1 : 0;
@@ -386,13 +414,40 @@ int main(int argc, char** argv)
 				                                           replyBudgetSamples));
 				CHECK(restored.writeAndVerifyParameterBlock(patchOneAddress, patch,
 				                                           replyBudgetSamples));
-				std::vector<uint8_t> savedSystem, savedPatch;
+				CHECK(restored.writeAndVerifyParameterBlock(timbreOneAddress, timbre,
+				                                           replyBudgetSamples));
+				std::vector<uint8_t> savedSystem, savedPatch, savedTimbre;
 				CHECK(restored.requestParameterBlock(systemAddress, systemSoundBytes,
 				                                     replyBudgetSamples, savedSystem));
 				CHECK(restored.requestParameterBlock(patchOneAddress, patchSelectionBytes,
 				                                     replyBudgetSamples, savedPatch));
+				CHECK(restored.requestParameterBlock(timbreOneAddress, timbreSoundBytes,
+				                                     replyBudgetSamples, savedTimbre));
 				CHECK(savedSystem == system);
 				CHECK(savedPatch == patch);
+				CHECK(savedTimbre == timbre);
+				// Capture the firmware's current part-1 sound image from a
+				// destination-safe clone, then restore it before the first note.
+				run(source, LaBoard::SampleRate);
+				std::vector<uint8_t> image;
+				CHECK(emu88Lib::LaSettings::isCaptureBoundary(source));
+				CHECK(emu88Lib::LaSettings::capture(source, replyBudgetSamples, image) ==
+				      emu88Lib::LaSettings::Result::Success);
+				CHECK_EQ(image.size(), emu88Lib::LaSettings::ImageBytes);
+				if(image.size() == emu88Lib::LaSettings::ImageBytes)
+				{
+					CHECK(std::equal(system.begin(), system.end(),
+					                 image.begin() + emu88Lib::LaSettings::SystemOffset));
+					LaBoard candidate(roms);
+					CHECK(emu88Lib::LaSettings::restore(candidate, image, bootSamples,
+					                                      replyBudgetSamples) ==
+					      emu88Lib::LaSettings::Result::Success);
+					std::vector<uint8_t> roundtrip;
+					CHECK(emu88Lib::LaSettings::capture(candidate, replyBudgetSamples,
+					                                    roundtrip) ==
+					      emu88Lib::LaSettings::Result::Success);
+					CHECK(roundtrip == image);
+				}
 			}
 		}
 	}

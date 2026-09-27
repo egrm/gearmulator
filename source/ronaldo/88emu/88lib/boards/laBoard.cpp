@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace emu88Lib
 {
@@ -116,6 +117,7 @@ namespace emu88Lib
 	void LaBoard::reset()
 	{
 		if(!m_valid) return;
+		m_samplesRendered = 0;
 		std::memset(directRam(), 0, DirectRamSize);
 		std::fill(m_ramHigh.begin(), m_ramHigh.end(), 0);
 		m_lcdBuffer.clear();
@@ -310,6 +312,7 @@ namespace emu88Lib
 	LaBoard::SampleFrame LaBoard::renderSample()
 	{
 		if(!m_valid) return {};
+		++m_samplesRendered;
 		m_midiIn->processSample();
 		// Clock the CPU alongside the LA32's 32 time-multiplexed partial slots. This also
 		// presents the real LA32 SH3 level on P0.4: SH3 changes twice per 32 kHz output frame,
@@ -383,35 +386,77 @@ namespace emu88Lib
 		if(m_midiIn) m_midiIn->transportDiscontinuity(generation);
 	}
 
+	std::function<std::unique_ptr<LaBoard>()> LaBoard::prepareExecutionClone() const
+	{
+		if(!m_valid || !m_romAssets) return {};
+		return [assets = m_romAssets]()
+		{
+			auto shell = std::make_unique<LaBoard>(*assets);
+			if(!shell->m_valid) return std::unique_ptr<LaBoard>{};
+			// Identity is the immutable source asset tuple; chips, callbacks and
+			// bus/device pointers remain those constructed for this destination.
+			shell->m_romAssets = assets;
+			shell->m_captureShell = true;
+			return shell;
+		};
+	}
+
+	bool LaBoard::acceptsExecutionFrom(const LaBoard& source) const
+	{
+		return this != &source && m_captureShell && m_valid && source.m_valid &&
+		       m_romAssets && m_romAssets == source.m_romAssets &&
+		       m_model == source.m_model && m_cpuStateRate == source.m_cpuStateRate &&
+		       m_midiIn && source.m_midiIn && !source.m_machine.cpu().in_slice();
+	}
+
+	bool LaBoard::copyExecutionFrom(const LaBoard& source)
+	{
+		if(!acceptsExecutionFrom(source)) return false;
+		m_bank = source.m_bank;
+		m_machine.cpu().select_code_bank(0x8000, 0x4000, m_bank);
+		if(!m_machine.copy_runtime_from(source.m_machine) ||
+		   !m_la32.copyRuntimeFrom(source.m_la32) ||
+		   !m_reverb.copyRuntimeFrom(source.m_reverb)) return false;
+		std::memcpy(directRam(), source.directRam(), DirectRamSize);
+		m_ramHigh = source.m_ramHigh;
+		m_lcd = source.m_lcd;
+		m_lcd.setChangeCallback({});
+		m_lcdBuffer = source.m_lcdBuffer;
+		m_midiIn->copyStateFrom(*source.m_midiIn);
+		m_midiOut = source.m_midiOut;
+		m_buttons = source.m_buttons;
+		m_dac = source.m_dac;
+		m_controlLatch = source.m_controlLatch;
+		m_reverbTime = source.m_reverbTime;
+		m_reverbLevel = source.m_reverbLevel;
+		m_port0 = source.m_port0;
+		m_knob = source.m_knob;
+		m_cpuRemainder = source.m_cpuRemainder;
+		m_vcaControl = source.m_vcaControl;
+		m_vcaGain = source.m_vcaGain;
+		m_analogSample = source.m_analogSample;
+		m_samplesRendered = source.m_samplesRendered;
+		m_captureShell = false;
+		return true;
+	}
+
 	std::unique_ptr<LaBoard> LaBoard::cloneExecution() const
 	{
-		if(!m_valid || !m_romAssets || m_machine.cpu().in_slice()) return {};
-		auto clone = std::make_unique<LaBoard>(*m_romAssets);
-		if(!clone->m_valid) return {};
-		clone->m_bank = m_bank;
-		clone->m_machine.cpu().select_code_bank(0x8000, 0x4000, m_bank);
-		if(!clone->m_machine.copy_runtime_from(m_machine) ||
-		   !clone->m_la32.copyRuntimeFrom(m_la32) ||
-		   !clone->m_reverb.copyRuntimeFrom(m_reverb)) return {};
-		std::memcpy(clone->directRam(), directRam(), DirectRamSize);
-		clone->m_ramHigh = m_ramHigh;
-		clone->m_lcd = m_lcd;
-		clone->m_lcd.setChangeCallback({});
-		clone->m_lcdBuffer = m_lcdBuffer;
-		clone->m_midiIn->copyStateFrom(*m_midiIn);
-		clone->m_midiOut = m_midiOut;
-		clone->m_buttons = m_buttons;
-		clone->m_dac = m_dac;
-		clone->m_controlLatch = m_controlLatch;
-		clone->m_reverbTime = m_reverbTime;
-		clone->m_reverbLevel = m_reverbLevel;
-		clone->m_port0 = m_port0;
-		clone->m_knob = m_knob;
-		clone->m_cpuRemainder = m_cpuRemainder;
-		clone->m_vcaControl = m_vcaControl;
-		clone->m_vcaGain = m_vcaGain;
-		clone->m_analogSample = m_analogSample;
+		auto prepare = prepareExecutionClone();
+		if(!prepare) return {};
+		auto clone = prepare();
+		if(!clone || !clone->copyExecutionFrom(*this)) return {};
 		return clone;
+	}
+
+	bool LaBoard::isCaptureInputBoundary() const
+	{
+		const auto released = std::all_of(m_buttons.begin(), m_buttons.end(), [](const uint8_t value) {
+			return value == std::numeric_limits<uint8_t>::max();
+		});
+		return m_valid && released && m_midiIn && m_midiIn->isInputDrained() &&
+		       !m_machine.periph().serial_input_pending() && !m_machine.cpu().in_slice() &&
+		       m_lcdBuffer.empty();
 	}
 
 	bool LaBoard::queryParameterBlock(const uint32_t address, const size_t size,
