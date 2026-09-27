@@ -111,6 +111,8 @@ namespace emu88Lib
 		bool copyCaptureFrom(const HardwareDevice& source);
 		bool isSettingsBoundary() const;
 		SettingsChunk captureSettings() const;
+		// Shared host/constructor validation; unsupported families remain explicit.
+		static bool supportsSettingsImage(const SettingsChunk& settings);
 		void advanceCaptureFrame();
 		const std::vector<SettingsChunk::Digest>& assetDigests() const { return m_assetDigests; }
 		// The SC-8850's VALUE encoder, or the MT-32's VOLUME/VALUE knob, which a detent turns
@@ -140,6 +142,8 @@ namespace emu88Lib
 		struct CaptureTag {};
 		HardwareDevice(const synthLib::DeviceCreateParams& params, DeviceModel model,
 		               std::unique_ptr<Sc88Pro> board, CaptureTag);
+		HardwareDevice(const synthLib::DeviceCreateParams& params, DeviceModel model,
+		               std::unique_ptr<Sc88> board, CaptureTag);
 		enum class PanelCommandType : uint8_t { Buttons, Encoder };
 		struct PanelCommand
 		{

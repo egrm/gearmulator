@@ -15,8 +15,8 @@ namespace emu88Player
         // Initial host schema. XML UTF-8 and decimal attributes have defined byte order;
         // hardware payload retains the existing SettingsChunk version independently.
         constexpr int hostStateVersion = 1;
-        // Capture failure guard, not a firmware completion heuristic. Success ONLY comes
-        // from Sc88ProSettings::isCaptureBoundary; this matches the existing 10 s boot budget.
+        // Capture failure guard, not a firmware completion heuristic. Success comes
+        // from HardwareDevice's model-specific boundary; use the existing 10 s boot budget.
         constexpr unsigned captureWatchdogSeconds = 10;
         constexpr size_t singleFrame = 1;
         // Ownership manifest: docs/research/88emu-complete-recall-contract.md.
@@ -290,10 +290,8 @@ namespace emu88Player
                 const auto settings = emu88Lib::SettingsChunk::decode(hardwareBytes.getData(), hardwareBytes.getSize());
                 if(!settings || static_cast<int>(settings->model) != model)
                     throw std::runtime_error("Hardware identity mismatch");
-                if(settings->model != emu88Lib::DeviceModel::Sc88Pro || settings->layout != emu88Lib::Sc88ProSettings::LayoutVersion)
+                if(!emu88Lib::HardwareDevice::supportsSettingsImage(*settings))
                     throw std::runtime_error("Required model/firmware adapter is unsupported");
-                if(settings->memory.size() != emu88Lib::Sc88Pro::SramSize)
-                    throw std::runtime_error("Invalid hardware memory extent");
                 emu88Lib::BootOptions boot;
                 boot.factoryReset = false;
                 boot.fastBoot = false;

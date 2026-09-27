@@ -3,6 +3,7 @@
 #include "88emuplayer/app/Emu88LaunchOptions.h"
 #include "88lib/settingsChunk.h"
 #include "88lib/boards/sc88pro.h"
+#include "88lib/boards/sc88types.h"
 #include "88lib/rom/romloader.h"
 #include "common/test_util.hpp"
 #include "baseLib/os.h"
@@ -124,6 +125,107 @@ namespace
         const auto address = (size_t{state.memory[0xcf7a]} << 8) | state.memory[0xcf7b];
         return state.memory.at(address + 8);
     }
+
+    void familyPanelRecall()
+    {
+        // Existing family probe maps the selected internal part through 56F0/56FA;
+        // visible A1 is internal slot1, not the first primary record.
+        // Exercise the processor's actual click ownership and state callbacks.
+        for(const auto model : {emu88Lib::DeviceModel::Sc88, emu88Lib::DeviceModel::Sc88VL})
+        {
+            emu88Player::Processor source;
+            CHECK(source.setDeviceModel(model));
+            source.setRateAndBufferSizeDetails(44100, 128);
+            source.prepareToPlay(44100, 128);
+            const auto baseline = save(source);
+            const auto baselineHardware = hardware(baseline);
+            const auto selectedAddress = model == emu88Lib::DeviceModel::Sc88 ? 0x56f0 : 0x56fa;
+            const auto part = (size_t{baselineHardware.memory.at(selectedAddress)} << 8) |
+                               baselineHardware.memory.at(selectedAddress + 1);
+            CHECK(part < 32);
+            const auto levelAddress = (part < 16 ? 0x8088 : 0x9588) + (part % 16) * 0x70 + 8;
+            const auto level = baselineHardware.memory.at(levelAddress);
+            const auto right = emu88Lib::buttonBit(emu88Lib::Button::LevelR);
+            source.clickPanelButton(right, 0);
+            source.clickPanelButton(right, 0);
+            const auto clicked = save(source);
+            CHECK(hardware(clicked).model == model);
+            CHECK_EQ(hardware(clicked).memory.at(levelAddress), level + 2);
+            emu88Player::Processor live;
+            load(live, baseline);
+            live.setRateAndBufferSizeDetails(44100, 128);
+            live.prepareToPlay(44100, 128);
+            live.clickPanelButton(right, 0);
+            live.clickPanelButton(right, 0);
+            render(live, 16384);
+            CHECK_EQ(hardware(save(live)).memory.at(levelAddress), level + 2);
+            emu88Player::Processor restored;
+            load(restored, clicked);
+            restored.setRateAndBufferSizeDetails(44100, 128);
+            restored.prepareToPlay(44100, 128);
+            render(restored, 128); // Invalidate retained bytes; inspect fresh hardware capture.
+            CHECK_EQ(hardware(save(restored)).memory.at(levelAddress), level + 2);
+            restored.clickPanelButton(right, 0);
+            CHECK_EQ(hardware(save(restored)).memory.at(levelAddress), level + 3);
+            const auto fixture = juce::File(emu88Player::defaultDataFolder()).getChildFile(
+                "panel-model-" + juce::String(static_cast<int>(model)) + ".component");
+            CHECK(fixture.replaceWithData(clicked.getData(), clicked.getSize()));
+            std::cout << "family processor immediate panel recall model=" << static_cast<int>(model) << '\n';
+        }
+    }
+
+    void proPanelRecall()
+    {
+        // tools/sc88pro_state_probe.cpp::testPanelMenuRecall establishes this
+        // native button sequence and the ROM's Fine Tune menu cursor/part words.
+        emu88Player::Processor source;
+        CHECK(source.setDeviceModel(emu88Lib::DeviceModel::Sc88Pro));
+        source.setRateAndBufferSizeDetails(44100, 128);
+        source.prepareToPlay(44100, 128);
+        source.config().setValue("audioSetup", "host-owned-routing-marker");
+        source.config().setValue("portMidiEnabled", true);
+        source.notifyStateChanged();
+        const auto press = [&source](emu88Lib::Sc88ProButton button)
+        {
+            // The native probe holds for 3200 and releases for 8000 samples
+            // at 32 kHz; equivalent host durations at this 44.1 kHz fixture.
+            constexpr int heldHostFrames = 4410;
+            constexpr int releasedHostFrames = 11025;
+            source.setPanelButtons(uint32_t{1} << static_cast<unsigned>(button));
+            render(source, heldHostFrames);
+            source.setPanelButtons(0);
+            render(source, releasedHostFrames);
+        };
+        const auto pressChord = [&source](uint32_t buttons)
+        {
+            constexpr int heldHostFrames = 4410;
+            constexpr int releasedHostFrames = 11025;
+            source.setPanelButtons(buttons);
+            render(source, heldHostFrames);
+            source.setPanelButtons(0);
+            render(source, releasedHostFrames);
+        };
+        press(emu88Lib::Sc88ProButton::PartR);
+        pressChord((uint32_t{1} << static_cast<unsigned>(emu88Lib::Sc88ProButton::PartL)) |
+                   (uint32_t{1} << static_cast<unsigned>(emu88Lib::Sc88ProButton::PartR)));
+        for(int next{}; next < 3; ++next) press(emu88Lib::Sc88ProButton::Sc88Map);
+        const auto clicked = save(source);
+        CHECK(!juce::String::fromUTF8(static_cast<const char*>(clicked.getData()),
+            static_cast<int>(clicked.getSize())).contains("host-owned-routing-marker"));
+        const auto settings = hardware(clicked);
+        CHECK(settings.model == emu88Lib::DeviceModel::Sc88Pro);
+        const auto word = [&settings](size_t address)
+        {
+            return (unsigned(settings.memory.at(address)) << 8) | settings.memory.at(address + 1);
+        };
+        CHECK_EQ(settings.memory.at(0x4b47), 2);
+        CHECK_EQ(word(0x4c60), 0x40);
+        CHECK_EQ(word(0x4d78), 1);
+        const auto fixture = juce::File(emu88Player::defaultDataFolder()).getChildFile(
+            "panel-model-2.component");
+        CHECK(fixture.replaceWithData(clicked.getData(), clicked.getSize()));
+        std::cout << "Pro processor Fine Tune menu component emitted\n";
+    }
 }
 
 int main(int argc, char** argv)
@@ -137,6 +239,18 @@ int main(int argc, char** argv)
     juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
     try
     {
+        if(argc > 1 && std::string(argv[1]) == "--family-panel")
+        {
+            familyPanelRecall();
+            emu88Player::standaloneLaunch = nullptr;
+            return test::finish("88emuFamilyPanelRecall");
+        }
+        if(argc > 1 && std::string(argv[1]) == "--pro-panel")
+        {
+            proPanelRecall();
+            emu88Player::standaloneLaunch = nullptr;
+            return test::finish("88emuProPanelRecall");
+        }
         emu88Player::Processor first;
         CHECK(first.hasValidRom());
         CHECK(!first.portMidiEnabled());

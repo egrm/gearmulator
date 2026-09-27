@@ -2,6 +2,7 @@
 
 #include "88lib/rom/romloader.h"
 #include "88lib/boards/sc88.h"
+#include "88lib/boards/sc88Settings.h"
 #include "88lib/boards/sc8850.h"
 #include "88lib/boards/sc8820.h"
 #include "88lib/boards/cm32p.h"
@@ -99,8 +100,7 @@ namespace emu88Lib
 		if(!isDeviceModelValue(_params.customData))
 			return;
 		m_model = static_cast<DeviceModel>(_params.customData);
-		if(_settings && (_settings->model != m_model || m_model != DeviceModel::Sc88Pro ||
-		                 _settings->layout != Sc88ProSettings::LayoutVersion || _boot.initialPanelButtons))
+		if(_settings && (_settings->model != m_model || !supportsSettingsImage(*_settings) || _boot.initialPanelButtons))
 			return;
 		m_dacBits = getDacBits(m_model);
 		m_boardGain = getBoardOutputGain(m_model);
@@ -170,7 +170,14 @@ namespace emu88Lib
 			auto waveData = m_model == DeviceModel::Xpgs
 				? RomLoader::findXpgsWaveRom() : RomLoader::findWaveRom().takeData();
 			if(waveData.empty()) break;
-			m_sc88 = std::make_unique<Sc88>(rom.takeData(), std::move(waveData), model, factoryReset);
+			auto firmware = rom.takeData();
+			const auto firmwareDigest = baseLib::MD5(firmware).getWords();
+			if(_settings && _settings->firmware != firmwareDigest) break;
+			m_assetDigests.push_back(firmwareDigest);
+			m_assetDigests.push_back(baseLib::MD5(waveData).getWords());
+			m_sc88 = std::make_unique<Sc88>(std::move(firmware), std::move(waveData), model, factoryReset);
+			if(_settings && Sc88Settings::restore(*m_sc88, _settings->memory) != Sc88Settings::Result::Success)
+				m_sc88.reset();
 			break;
 		}
 		case DeviceModel::Sc55Mk2:
@@ -257,14 +264,42 @@ namespace emu88Lib
 
 	HardwareDevice::~HardwareDevice() = default;
 
+	bool HardwareDevice::supportsSettingsImage(const SettingsChunk& settings)
+	{
+		switch(settings.model)
+		{
+		case DeviceModel::Sc88Pro:
+			return settings.layout == Sc88ProSettings::LayoutVersion && settings.memory.size() == Sc88Pro::SramSize;
+		case DeviceModel::Sc88:
+		case DeviceModel::Sc88VL:
+			return settings.layout == Sc88Settings::LayoutVersion && settings.memory.size() == Sc88::SramSize;
+		default:
+			return false;
+		}
+	}
+
 	HardwareDevice::HardwareDevice(const synthLib::DeviceCreateParams& params, const DeviceModel model,
 	                               std::unique_ptr<Sc88Pro> board, CaptureTag)
 		: synthLib::Device(params), m_model(model), m_sc88Pro(std::move(board))
 	{
 	}
 
+	HardwareDevice::HardwareDevice(const synthLib::DeviceCreateParams& params, const DeviceModel model,
+	                               std::unique_ptr<Sc88> board, CaptureTag)
+		: synthLib::Device(params), m_model(model), m_sc88(std::move(board))
+	{
+	}
+
 	std::function<std::unique_ptr<HardwareDevice>()> HardwareDevice::prepareCaptureClone() const
 	{
+		if((m_model == DeviceModel::Sc88 || m_model == DeviceModel::Sc88VL) && m_sc88)
+			return [params = getDeviceCreateParams(), model = m_model,
+			        prepareBoard = m_sc88->prepareExecutionClone()]() mutable
+			{
+				auto board = prepareBoard();
+				if(!board) return std::unique_ptr<HardwareDevice>{};
+				return std::unique_ptr<HardwareDevice>(new HardwareDevice(params, model, std::move(board), CaptureTag{}));
+			};
 		if(m_model != DeviceModel::Sc88Pro || !m_sc88Pro)
 			throw std::runtime_error("Settings capture adapter unavailable for this model");
 		return [params = getDeviceCreateParams(), model = m_model,
@@ -278,17 +313,21 @@ namespace emu88Lib
 
 	bool HardwareDevice::acceptsCaptureFrom(const HardwareDevice& source) const
 	{
-		return m_model == source.m_model && m_sc88Pro && source.m_sc88Pro &&
-		       m_sc88Pro->acceptsExecutionFrom(*source.m_sc88Pro);
+		return m_model == source.m_model &&
+		       ((m_sc88Pro && source.m_sc88Pro && m_sc88Pro->acceptsExecutionFrom(*source.m_sc88Pro)) ||
+		        (m_sc88 && source.m_sc88 && m_sc88->acceptsExecutionFrom(*source.m_sc88)));
 	}
 
 	bool HardwareDevice::copyCaptureFrom(const HardwareDevice& source)
 	{
-		if(!acceptsCaptureFrom(source) || !m_sc88Pro->copyExecutionFrom(*source.m_sc88Pro)) return false;
+		if(!acceptsCaptureFrom(source)) return false;
+		if(m_sc88Pro && !m_sc88Pro->copyExecutionFrom(*source.m_sc88Pro)) return false;
+		if(m_sc88 && !m_sc88->copyExecutionFrom(*source.m_sc88)) return false;
 		m_assetDigests = source.m_assetDigests;
 		m_midiIn = source.m_midiIn;
 		m_sc88ProMidiOut = source.m_sc88ProMidiOut;
 		m_sc88ProMidiOutOffsets = source.m_sc88ProMidiOutOffsets;
+		m_sc88MidiOut = source.m_sc88MidiOut;
 		m_panelCommands = source.m_panelCommands;
 		{
 			std::lock_guard lock(source.m_panelMutex);
@@ -319,8 +358,9 @@ namespace emu88Lib
 	bool HardwareDevice::isSettingsBoundary() const
 	{
 		std::lock_guard lock(m_panelMutex);
-		return m_sc88Pro && m_midiIn.empty() && m_panelCommands.empty() && m_pendingPanelCommands.empty() &&
-		       Sc88ProSettings::isCaptureBoundary(*m_sc88Pro, true);
+		return m_midiIn.empty() && m_panelCommands.empty() && m_pendingPanelCommands.empty() &&
+		       ((m_sc88Pro && Sc88ProSettings::isCaptureBoundary(*m_sc88Pro, true)) ||
+		        (m_sc88 && Sc88Settings::isCaptureBoundary(*m_sc88, true)));
 	}
 
 	SettingsChunk HardwareDevice::captureSettings() const
@@ -328,6 +368,14 @@ namespace emu88Lib
 		if(!isSettingsBoundary()) throw std::runtime_error("Firmware has not acknowledged all accepted input");
 		SettingsChunk result;
 		result.model = m_model;
+		if(m_sc88)
+		{
+			result.layout = Sc88Settings::LayoutVersion;
+			result.firmware = m_assetDigests.front();
+			if(Sc88Settings::capture(*m_sc88, result.memory) != Sc88Settings::Result::Success)
+				throw std::runtime_error("Settings adapter unavailable for firmware fingerprint");
+			return result;
+		}
 		result.layout = Sc88ProSettings::LayoutVersion;
 		result.firmware = m_sc88Pro->firmwareHash().getWords();
 		if(Sc88ProSettings::capture(*m_sc88Pro, result.memory) != Sc88ProSettings::Result::Success)
@@ -583,6 +631,8 @@ namespace emu88Lib
 		// The audited Pro firmware must consume an edge before receiving its successor.
 		// This identical path runs on live hardware and its exact private capture clone.
 		if(m_sc88Pro && !Sc88ProSettings::isCaptureBoundary(*m_sc88Pro, true)) return;
+		if(m_sc88 && (m_model == DeviceModel::Sc88 || m_model == DeviceModel::Sc88VL) &&
+		   !Sc88Settings::isPanelInputBoundary(*m_sc88)) return;
 		const auto command = m_panelCommands.front();
 		m_panelCommands.pop_front();
 		if(command.type == PanelCommandType::Buttons)

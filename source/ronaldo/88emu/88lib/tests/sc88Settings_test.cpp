@@ -35,6 +35,15 @@ struct Sc88ExecutionProbe
         board.m_sram = image;
     }
     static void setPreference(Sc88& board, uint8_t value) { board.m_sram[0xc072] = value; }
+    static void setByte(Sc88& board, size_t address, uint8_t value)
+    {
+        board.m_sram.at(address)=value;
+    }
+    static void setWord(Sc88& board, size_t address, uint16_t value)
+    {
+        board.m_sram.at(address)=static_cast<uint8_t>(value>>8);
+        board.m_sram.at(address+1)=static_cast<uint8_t>(value);
+    }
     static uint64_t samples(const Sc88& board) { return board.m_samplesRendered; }
 };
 }
@@ -477,6 +486,103 @@ void reportRamDifferences(const std::vector<uint8_t>& before,
                   << '>' << unsigned(after[address]) << ' ' << std::dec;
     }
     std::cout << '\n';
+}
+
+bool captureRings(Model model)
+{
+    // Producer/consumer addresses and empty free counts are independently
+    // decoded in docs/research/88emu-sc88-vl-midi-boundary-ring.md.
+    struct Ring { const char* name; size_t read; size_t write; uint16_t start; };
+    const auto sc=model==Model::Sc88;
+    const std::array rings=sc
+        ? std::array{Ring{"MIDI ISR",0x05ea,0x05ec,0x05ee},
+                     Ring{"MIDI work",0x0228,0x0226,0x022a},
+                     Ring{"secondary UI",0x41ea,0x41ec,0x41ee}}
+        : std::array{Ring{"MIDI ISR",0x0666,0x0668,0x066a},
+                     Ring{"MIDI work",0x02a2,0x02a0,0x02a4},
+                     Ring{"secondary UI",0x4266,0x4268,0x426a}};
+    const auto freeCount=sc?size_t{0x03ba}:size_t{0x0434};
+    const auto word=[](const std::vector<uint8_t>& ram, size_t address)
+    { return static_cast<uint16_t>((uint16_t{ram.at(address)}<<8)|ram.at(address+1)); };
+    auto romAsset=RomLoader::findROM(model);
+    auto waves=RomLoader::findWaveRom().takeData();
+    if(!romAsset.isValid() || romAsset.model()!=model || waves.empty())
+        throw std::runtime_error("required model ROM or wave image missing");
+    auto live=std::make_unique<Sc88>(romAsset.takeData(),waves,model);
+    run(*live,g_bootSamples);
+    for(unsigned sample{};sample<g_sampleRate &&
+        !Sc88Settings::isCaptureBoundary(*live);++sample) live->renderSample();
+    if(!Sc88Settings::isCaptureBoundary(*live))
+        throw std::runtime_error("native board did not reach the bounded capture fixture");
+    const auto& baseline=Sc88ExecutionProbe::ram(*live);
+    for(const auto& ring:rings)
+    {
+        if(word(baseline,ring.read)!=word(baseline,ring.write))
+            throw std::runtime_error("native ring is not empty at capture fixture");
+        auto pending=live->cloneExecution();
+        if(!pending) throw std::runtime_error("private ring fixture clone failed");
+        const auto write=word(baseline,ring.write);
+        // Choose a different in-range read position without touching the
+        // source. A producer-written record would leave these pointers unequal.
+        const auto changed=write==ring.start ? static_cast<uint16_t>(ring.start+1)
+                                             : ring.start;
+        Sc88ExecutionProbe::setWord(*pending,ring.read,changed);
+        if(Sc88Settings::isCaptureBoundary(*pending))
+        {
+            std::cerr << "FAIL model=" << static_cast<int>(model)
+                      << " accepted pending " << ring.name << " ring\n";
+            return false;
+        }
+        if(!Sc88Settings::isCaptureBoundary(*live))
+            throw std::runtime_error("private ring fixture changed source boundary");
+    }
+    // The panel feeder is upstream of the MIDI work ring: SC 00:0995..0A22
+    // owns 03BE/03C0, VL 00:0A17..0AA4 owns 043A/043C. This synthetic
+    // pending marker is checked only at the predicate; do not render it as a
+    // firmware record because no payload was inserted into the private clone.
+    const auto feederRead=sc?size_t{0x03be}:size_t{0x043a};
+    const auto feederWrite=sc?size_t{0x03c0}:size_t{0x043c};
+    const auto feederStart=sc?uint16_t{0x03c2}:uint16_t{0x043e};
+    if(word(baseline,feederRead)!=word(baseline,feederWrite))
+        throw std::runtime_error("native panel feeder is not empty at capture fixture");
+    auto pendingFeeder=live->cloneExecution();
+    if(!pendingFeeder) throw std::runtime_error("private feeder fixture clone failed");
+    Sc88ExecutionProbe::setWord(*pendingFeeder,feederRead,feederStart);
+    Sc88ExecutionProbe::setWord(*pendingFeeder,feederWrite,
+                                static_cast<uint16_t>(feederStart+sizeof(uint32_t)));
+    if(Sc88Settings::isCaptureBoundary(*pendingFeeder))
+    {
+        std::cerr << "FAIL model=" << static_cast<int>(model)
+                  << " accepted pending panel feeder ring\n";
+        return false;
+    }
+    if(!Sc88Settings::isCaptureBoundary(*live))
+        throw std::runtime_error("private feeder fixture changed source boundary");
+    auto pendingWork=live->cloneExecution();
+    if(!pendingWork) throw std::runtime_error("private work-count fixture clone failed");
+    if(sc)
+    {
+        if(baseline.at(freeCount)!=0x64)
+            throw std::runtime_error("native SC work ring free count is not empty");
+        Sc88ExecutionProbe::setByte(*pendingWork,freeCount,0x63);
+    }
+    else
+    {
+        if(word(baseline,freeCount)!=0x0064)
+            throw std::runtime_error("native VL work ring free count is not empty");
+        Sc88ExecutionProbe::setWord(*pendingWork,freeCount,0x0063);
+    }
+    if(Sc88Settings::isCaptureBoundary(*pendingWork))
+    {
+        std::cerr << "FAIL model=" << static_cast<int>(model)
+                  << " accepted pending MIDI work count\n";
+        return false;
+    }
+    if(!Sc88Settings::isCaptureBoundary(*live))
+        throw std::runtime_error("private work-count fixture changed source boundary");
+    std::cout << "capture rings model=" << static_cast<int>(model)
+              << " rejected pending ISR/feeder/work/UI pointers and work count\n";
+    return true;
 }
 
 bool exercise(Model model, bool isolateHistory)
@@ -1187,10 +1293,31 @@ bool exercise(Model model, bool isolateHistory)
         auto invalidPreference=variant; invalidPreference[g_preference]=2;
         check(Sc88Settings::restore(*restored,invalidPreference)==Result::InvalidImage,
               "reject invalid C072 preference");
+		const auto panelPage=model==Model::Sc88?size_t{0x54d2}:size_t{0x54da};
+		const auto requestedPage=model==Model::Sc88?size_t{0x54d3}:size_t{0x54db};
+		// The native UserInst handlers request 3/0, then the display worker
+		// publishes the current page (SC 01:C784/C792/A750; VL 01:BED3/BEE1/9A9D).
+		for(const uint8_t unsupportedPage:{uint8_t{1},uint8_t{2},uint8_t{4},uint8_t{255}})
+		{
+			auto invalidPage=variant;
+			invalidPage[panelPage]=unsupportedPage;
+			invalidPage[requestedPage]=unsupportedPage;
+			check(Sc88Settings::restore(*restored,invalidPage)==Result::InvalidImage,
+			      "reject unsupported panel page before mutation");
+		}
+		for(const uint8_t settledPage:{uint8_t{0},uint8_t{3}})
+		{
+			auto pendingPage=variant;
+			pendingPage[panelPage]=settledPage;
+			pendingPage[requestedPage]=settledPage==0?uint8_t{3}:uint8_t{0};
+			check(Sc88Settings::restore(*restored,pendingPage)==Result::InvalidImage,
+			      "reject pending panel page transition before mutation");
+		}
         for(const uint8_t invalidGroup:{uint8_t{0},uint8_t{4},uint8_t{255}})
         {
             auto invalidUserGroup=variant;
-            invalidUserGroup[model==Model::Sc88?0x54d2:0x54da]=3;
+			invalidUserGroup[panelPage]=3;
+			invalidUserGroup[requestedPage]=3;
             invalidUserGroup[model==Model::Sc88?0x54d7:0x54df]=invalidGroup;
             check(Sc88Settings::restore(*restored,invalidUserGroup)==Result::InvalidImage,
                   "reject invalid active UserInst subgroup");
@@ -1757,14 +1884,17 @@ int main(int argc,char** argv)
 {
     baseLib::disableErrorDialogs();
     const bool isolateHistory=argc==3 && std::string_view(argv[2])=="--isolate-history";
-    if(argc!=2 && !isolateHistory) return 77;
+    const bool rings=argc==3 && std::string_view(argv[2])=="--capture-rings";
+    if(argc!=2 && !isolateHistory && !rings) return 77;
     synthLib::RomLoader::setSearchPath(argv[1]);
     try
     {
         bool good=true;
-        for(const auto model : {Model::Sc88,Model::Sc88VL}) good &= exercise(model,isolateHistory);
-        std::cout << (isolateHistory ? "SC-88/VL history isolation diagnostic "
-                                      : "SC-88/VL receiver settings foundation ")
+        for(const auto model : {Model::Sc88,Model::Sc88VL})
+            good &= rings ? captureRings(model) : exercise(model,isolateHistory);
+        std::cout << (rings ? "SC-88/VL capture ring boundary "
+                            : isolateHistory ? "SC-88/VL history isolation diagnostic "
+                                             : "SC-88/VL receiver settings foundation ")
                   << (good?"passed":"failed") << '\n';
         return good?0:1;
     }

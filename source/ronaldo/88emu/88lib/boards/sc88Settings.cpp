@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace emu88Lib
@@ -61,11 +63,60 @@ namespace emu88Lib
 		constexpr size_t g_sc88PanelPage = 0x54d2;
 		constexpr size_t g_sc88vlPanelPage = 0x54da;
 		constexpr uint8_t g_userInstrumentPage = 3;
+		// UserInst entry/exit writes requested pages 3/0 at SC 01:C784/C792
+		// and VL 01:BED3/BEE1; workers 01:A750/01:9A9D publish them.
+		constexpr uint8_t g_normalPage = 0;
+		constexpr size_t g_sc88RequestedPage = 0x54d3;
+		constexpr size_t g_sc88vlRequestedPage = 0x54db;
+		// The source-verified dispatcher idle loops are SC 00:06B7/06BB/06BE
+		// and VL 00:0733/0737/073A (family idle disassemblies).
+		constexpr std::array<uint32_t,3> g_sc88IdlePc{0x06b7,0x06bb,0x06be};
+		constexpr std::array<uint32_t,3> g_sc88vlIdlePc{0x0733,0x0737,0x073a};
+		// Both loops compare the ready-queue pointer with 75EE. Their kernel
+		// nesting word is accessed at 75AE (same archived disassemblies).
+		constexpr size_t g_readyQueue = 0x75f8;
+		constexpr uint16_t g_emptyReadyQueue = 0x75ee;
+		constexpr size_t g_kernelNesting = 0x75ae;
+		// SC 01:A37C/A3BF and VL 01:9696/07:BCA4 scan and queue keys here.
+		// The scanner/UI waits are SC 01:A211/C065 and VL 01:95CE/B45C.
+		constexpr size_t g_keyRead = 0x5000, g_keyWrite = 0x5002;
+		constexpr size_t g_previousMatrix = 0x5004, g_scannedMatrix = 0x5008;
+		constexpr size_t g_deferredKeys = 0x5030;
+		constexpr size_t g_scannerTask = 0x75c0, g_uiTask = 0x75d0;
+		constexpr uint8_t g_scannerSleeping = 0x81, g_uiSleeping = 0x89;
+		constexpr uint8_t g_scannerWorkMask = 1, g_uiWorkMask = 9;
+		constexpr uint8_t g_deferredMask = 1;
+		// Native producer/consumer disassembly: SC 00:0C4E/0B5D and
+		// VL 00:0CE8/0BF6 (88emu-sc88-vl-midi-boundary-ring.md).
+		constexpr size_t g_sc88MidiRead = 0x05ea, g_sc88MidiWrite = 0x05ec;
+		constexpr size_t g_sc88vlMidiRead = 0x0666, g_sc88vlMidiWrite = 0x0668;
+		// The first consumer forwards to a second ring, not to the parameter
+		// handler: SC 00:08C2/092C; VL 00:0942/09AD. Each record is two words.
+		constexpr size_t g_sc88WorkWrite = 0x0226, g_sc88WorkRead = 0x0228;
+		constexpr size_t g_sc88WorkBegin = 0x022a, g_sc88WorkFree = 0x03ba;
+		constexpr size_t g_sc88vlWorkWrite = 0x02a0, g_sc88vlWorkRead = 0x02a2;
+		constexpr size_t g_sc88vlWorkBegin = 0x02a4, g_sc88vlWorkFree = 0x0434;
+		constexpr size_t g_midiRecordBytes = sizeof(uint16_t) + sizeof(uint16_t);
+		// Parameter-message feeder producer/consumer SC 00:0A12/09ED and
+		// VL 00:0A94/0A6F forward into the work ring (boundary-ring report).
+		constexpr size_t g_sc88FeederRead = 0x03be, g_sc88FeederWrite = 0x03c0;
+		constexpr size_t g_sc88vlFeederRead = 0x043a, g_sc88vlFeederWrite = 0x043c;
+		// UI event queue initializers SC 01:9749 and VL 01:89F9; consumers
+		// SC 01:96F0 / VL 01:89A0 are called separately from the key ring.
+		constexpr size_t g_sc88UiRead = 0x41ea, g_sc88UiWrite = 0x41ec;
+		constexpr size_t g_sc88vlUiRead = 0x4266, g_sc88vlUiWrite = 0x4268;
+		// ROM-selected UserInst titles from SC 07:B2BC/B2EC/B30C and
+		// VL 07:D1C0/D1F0/D210. The visible LCD can lag the sleeping UI task.
+		constexpr std::array<std::string_view,3> g_userTitles{"Vib.","Fil.","Env."};
+		constexpr size_t g_titleColumn = 3, g_titleWidth = 4;
+		constexpr size_t g_filterDashColumn = 8, g_filterDashWidth = 3;
+		constexpr std::string_view g_filterDashes = "---";
 		// Native Select handlers SC 01:CF0F..CF1F / VL 01:C6AC..C6BC
 		// cycle Vibrato, Filter and Envelope through subgroup values 1..3.
 		constexpr size_t g_sc88UserGroup = 0x54d7;
 		constexpr size_t g_sc88vlUserGroup = 0x54df;
 		constexpr uint8_t g_firstUserGroup = 1;
+		constexpr uint8_t g_filterUserGroup = 2; // ROM subgroup 2 is Filter.
 		constexpr uint8_t g_lastUserGroup = 3;
 		// Match the native panel gesture timing used by the Pro adapter and
 		// Sc88::runFactoryReset, allowing the scanner to consume each edge.
@@ -126,6 +177,71 @@ namespace emu88Lib
 		       ((board.m_model == Model::Sc88 && board.m_firmwareHash == g_sc88Firmware) ||
 		        (board.m_model == Model::Sc88VL && board.m_firmwareHash == g_sc88vlFirmware));
 	}
+	bool Sc88Settings::isPanelInputBoundary(const Sc88& board)
+	{
+		if(!supported(board) || board.m_machine.cpu().in_slice()) return false;
+		const auto& ram = board.m_sram;
+		const auto sc = board.m_model == Model::Sc88;
+		const auto& idlePc = sc ? g_sc88IdlePc : g_sc88vlIdlePc;
+		const auto pc = board.m_machine.cpu().code_addr(board.m_machine.cpu().regs().pc);
+		if(std::find(idlePc.begin(),idlePc.end(),pc) == idlePc.end() ||
+		   readWord(ram,g_readyQueue) != g_emptyReadyQueue ||
+		   readWord(ram,g_kernelNesting) != uint16_t{} ||
+		   readWord(ram,g_keyRead) != readWord(ram,g_keyWrite)) return false;
+		if(ram[g_scannerTask] != g_scannerSleeping ||
+		   (ram[g_scannerTask+sizeof(uint8_t)] & g_scannerWorkMask) ||
+		   ram[g_uiTask] != g_uiSleeping ||
+		   (ram[g_uiTask+sizeof(uint8_t)] & g_uiWorkMask)) return false;
+		for(size_t column{};column<sizeof(board.m_buttons);++column)
+		{
+			const auto observed = static_cast<uint8_t>(
+				~(board.m_buttons >> (column * g_byteBits)));
+			if(ram[g_previousMatrix+column] != observed ||
+			   ram[g_scannedMatrix+column] != observed) return false;
+		}
+		return true;
+	}
+	bool Sc88Settings::isCaptureBoundary(const Sc88& board, const bool requireReleasedPanel)
+	{
+		// Only the released-panel restore path has bounded native tests.
+		if(!requireReleasedPanel || board.m_buttons != uint32_t{} ||
+		   !isPanelInputBoundary(board) || !board.m_midiInQueue.empty() ||
+		   board.m_midiMailboxFull || board.m_midiWireDelay != uint32_t{} ||
+		   board.m_gaLcdEvent != decltype(board.m_gaLcdEvent){}) return false;
+		const auto& ram = board.m_sram;
+		const auto sc = board.m_model == Model::Sc88;
+		const auto page = ram[sc ? g_sc88PanelPage : g_sc88vlPanelPage];
+		if(readWord(ram,sc ? g_sc88MidiRead : g_sc88vlMidiRead) !=
+		   readWord(ram,sc ? g_sc88MidiWrite : g_sc88vlMidiWrite) ||
+		   readWord(ram,sc ? g_sc88WorkRead : g_sc88vlWorkRead) !=
+		   readWord(ram,sc ? g_sc88WorkWrite : g_sc88vlWorkWrite) ||
+		   readWord(ram,sc ? g_sc88FeederRead : g_sc88vlFeederRead) !=
+		   readWord(ram,sc ? g_sc88FeederWrite : g_sc88vlFeederWrite) ||
+		   readWord(ram,sc ? g_sc88UiRead : g_sc88vlUiRead) !=
+		   readWord(ram,sc ? g_sc88UiWrite : g_sc88vlUiWrite)) return false;
+		const auto workFree = sc ? ram[g_sc88WorkFree] : readWord(ram,g_sc88vlWorkFree);
+		const auto capacity = sc ? (g_sc88WorkFree-g_sc88WorkBegin)/g_midiRecordBytes
+		                         : (g_sc88vlWorkFree-g_sc88vlWorkBegin)/g_midiRecordBytes;
+		if(workFree != capacity) return false;
+		if(page != g_normalPage && page != g_userInstrumentPage) return false;
+		if(page != ram[sc ? g_sc88RequestedPage : g_sc88vlRequestedPage]) return false;
+		for(size_t key{};key<std::numeric_limits<decltype(board.m_buttons)>::digits;++key)
+			if(ram[g_deferredKeys+key] & g_deferredMask) return false;
+		if(page == g_userInstrumentPage)
+		{
+			const auto group = ram[sc ? g_sc88UserGroup : g_sc88vlUserGroup];
+			if(group < g_firstUserGroup || group > g_lastUserGroup) return false;
+			const auto& lcd = board.m_lcd;
+			std::string visible(lcd.getVisibleColumns()*lcd.getVisibleLines(),' ');
+			lcd.copyVisibleDdRam(visible.data());
+			if(visible.substr(g_titleColumn,g_titleWidth) != g_userTitles[group-g_firstUserGroup])
+				return false;
+			if(group == g_filterUserGroup &&
+			   visible.substr(g_filterDashColumn,g_filterDashWidth) != g_filterDashes)
+				return false;
+		}
+		return true;
+	}
 
 	Sc88Settings::Result Sc88Settings::capture(const Sc88& board, std::vector<uint8_t>& image)
 	{
@@ -146,9 +262,14 @@ namespace emu88Lib
 		const auto switches = board.m_model == Model::Sc88 ? g_sc88SwitchBase : g_sc88vlSwitchBase;
 		const auto selectedIndex = board.m_model == Model::Sc88 ? g_sc88SelectedIndex : g_sc88vlSelectedIndex;
 		const auto panelPage = board.m_model == Model::Sc88 ? g_sc88PanelPage : g_sc88vlPanelPage;
+		const auto requestedPage = board.m_model == Model::Sc88 ? g_sc88RequestedPage : g_sc88vlRequestedPage;
 		const auto userGroup = board.m_model == Model::Sc88 ? g_sc88UserGroup : g_sc88vlUserGroup;
 		const auto savedSelection = readWord(image,selectedIndex);
 		if(savedSelection >= g_parts) return Result::InvalidImage;
+		// Only normal and UserInst pages have source-backed fresh-board panel
+		// reconstruction. A pending page transition is not a settled image.
+		if((image[panelPage] != g_normalPage && image[panelPage] != g_userInstrumentPage) ||
+		   image[requestedPage] != image[panelPage]) return Result::InvalidImage;
 		if(image[panelPage]==g_userInstrumentPage &&
 		   (image[userGroup]<g_firstUserGroup || image[userGroup]>g_lastUserGroup))
 			return Result::InvalidImage;
