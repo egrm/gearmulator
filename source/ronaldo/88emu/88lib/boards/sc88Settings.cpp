@@ -46,6 +46,12 @@ namespace emu88Lib
 		// pressure bytes per part. These receive values are separate from voices.
 		constexpr size_t g_polyPressureBase = 0xc660;
 		constexpr size_t g_polyPressureKeys = 128;
+		// Native event consumers SC 1EB0/1EF0/1F58 and VL 2060/20A0/2108
+		// retain portamento, hold and sostenuto in bits 5, 7 and 6. The
+		// separate active-key membership arrays are not restored.
+		constexpr size_t g_sc88SwitchBase = 0xe59e;
+		constexpr size_t g_sc88vlSwitchBase = 0xe5b2;
+		constexpr uint8_t g_switchMask = 0xe0;
 		constexpr size_t g_partStride = sizeof(uint16_t); // R3 is doubled part index.
 		constexpr auto g_byteBits = std::numeric_limits<uint8_t>::digits;
 		// SC-88 handlers 30EC..326E and VL 31BD..333F. Controller values are
@@ -94,6 +100,7 @@ namespace emu88Lib
 		const auto meterStart = board.m_model == Model::Sc88 ? g_sc88MeterStart : g_sc88vlMeterStart;
 		const auto accumulator = board.m_model == Model::Sc88 ? g_sc88Accumulator : g_sc88vlAccumulator;
 		const auto voiceOwner = board.m_model == Model::Sc88 ? g_sc88VoiceOwnerStart : g_sc88vlVoiceOwnerStart;
+		const auto switches = board.m_model == Model::Sc88 ? g_sc88SwitchBase : g_sc88vlSwitchBase;
 		std::array<uint8_t,g_meterCount> freshMeters{};
 		std::array<uint8_t,g_accumulatorBytes> freshAccumulator{};
 		std::array<uint8_t,g_voiceOwnerCount> freshVoiceOwners{};
@@ -120,6 +127,9 @@ namespace emu88Lib
 		for(size_t part{}; part < g_parts; ++part)
 		{
 			const auto stride = part * g_partStride;
+			board.m_sram[switches+stride] = static_cast<uint8_t>(
+				(board.m_sram[switches+stride] & ~g_switchMask) |
+				(image[switches+stride] & g_switchMask));
 			for(const auto address : g_receiverBytes)
 				board.m_sram[address + stride] = image[address + stride];
 			for(const auto& [source, target] : g_dirtyMasks)

@@ -540,6 +540,44 @@ bool exercise(Model model, bool isolateHistory)
         std::cout << "poly-pressure native-mismatches=" << nativeMismatch
                   << " lost-on-restore=" << lost << '\n';
         check(lost==0,"restore all native per-key pressure values");
+        // Queue consumers SC 1EB0/1EF0/1F58 and VL 2060/20A0/2108
+        // retain portamento/hold/sostenuto switches in bits 5/7/6.
+        const size_t switches=model==Model::Sc88 ? 0xe59e : 0xe5b2;
+        auto switchSource=live->cloneExecution();
+        if(!switchSource) throw std::runtime_error("switch source clone failed");
+        for(size_t part{};part<g_partCount;++part)
+            for(uint8_t controller : {uint8_t{64},uint8_t{65},uint8_t{66}})
+                send(*switchSource,static_cast<uint8_t>(part/g_groupSize),
+                     static_cast<uint8_t>(0xb0 | (part%g_groupSize)),controller,127);
+        run(*switchSource,g_drainSamples);
+        std::vector<uint8_t> switchImage;
+        check(Sc88Settings::capture(*switchSource,switchImage)==Result::Success,
+              "capture native pedal switches");
+        auto switchRestored=std::make_unique<Sc88>(rom,waves,model,false);
+        check(Sc88Settings::restore(*switchRestored,switchImage)==Result::Success,
+              "restore native pedal switch image");
+        size_t switchNativeMismatch{}, switchLost{};
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto address=switches+2*part;
+            switchNativeMismatch += (switchImage.at(address)&0xe0)!=0xe0;
+            switchLost += (Sc88ExecutionProbe::ram(*switchRestored)[address]&0xe0)!=
+                          (switchImage.at(address)&0xe0);
+        }
+        std::cout << "pedal-switch native-mismatches=" << switchNativeMismatch
+                  << " lost-on-restore=" << switchLost << '\n';
+        check(switchNativeMismatch==0,"native pedals set all 32 part switch masks");
+        check(switchLost==0,"restore all native pedal switch masks");
+        for(size_t part{};part<g_partCount;++part)
+            for(uint8_t controller : {uint8_t{64},uint8_t{65},uint8_t{66}})
+                send(*switchRestored,static_cast<uint8_t>(part/g_groupSize),
+                     static_cast<uint8_t>(0xb0 | (part%g_groupSize)),controller,0);
+        run(*switchRestored,g_drainSamples);
+        size_t switchesStillOn{};
+        for(size_t part{};part<g_partCount;++part)
+            switchesStillOn += (Sc88ExecutionProbe::ram(*switchRestored)[switches+2*part]&0xe0)!=0;
+        check(switchesStillOn==0,"native pedal-off clears all restored switch masks");
+        std::cout << "pedal-switch still-on-after-native-off=" << switchesStillOn << '\n';
     }
     if(!isolateHistory) for(uint8_t savedPreference : {uint8_t{0},uint8_t{1}})
     {
