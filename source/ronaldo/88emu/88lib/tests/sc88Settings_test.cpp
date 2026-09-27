@@ -640,6 +640,118 @@ bool exercise(Model model, bool isolateHistory)
         }
         std::cout << "RPN-tuning next-data-entry-mismatches=" << continuationMismatch << '\n';
         check(continuationMismatch==0,"next native RPN data entry preserves selector and saved LSB");
+
+        // NRPN MSB 01, low selectors 08/20/63: SC 32A9..32ED and
+        // VL 3380..33C4 dispatch data entry through the native per-part R2.
+        auto nrpnSource=live->cloneExecution();
+        if(!nrpnSource) throw std::runtime_error("NRPN source clone failed");
+        // Native GS Rx.NRPN DT1, also used by sc88pro_state_probe. SC
+        // 3257/3265 and VL 3328/3336 gate the selectors on part+2 bit15.
+        // Exercise every native address slot so drum-part numbering is covered.
+        for(size_t part{};part<g_partCount;++part)
+        {
+            synthLib::SMidiEvent enable(synthLib::MidiEventSource::Host);
+            enable.sysex={0xf0,0x41,0x10,0x42,0x12,
+                static_cast<uint8_t>(0x40+(part/g_groupSize)*0x10),
+                static_cast<uint8_t>(0x10+part%g_groupSize),0x0a,1};
+            unsigned sum{};
+            for(size_t i=5;i<enable.sysex.size();++i) sum+=enable.sysex[i];
+            enable.sysex.push_back(static_cast<uint8_t>((128-(sum&127))&127));
+            enable.sysex.push_back(0xf7);
+            nrpnSource->addMidiEvent(enable);
+        }
+        run(*nrpnSource,g_drainSamples);
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto base=(part<g_groupSize?size_t{0x8088}:size_t{0x9588})+
+                            (part%g_groupSize)*0x70;
+            check((Sc88ExecutionProbe::ram(*nrpnSource)[base+2]&0x80)!=0,
+                  "native DT1 enables NRPN receive on every part");
+        }
+        constexpr std::array<std::pair<uint8_t,uint8_t>,3> nrpnEdits{{
+            {0x08,73}, // Native vibrato field: part +10.
+            {0x20,81}, // Native filter field: part +12.
+            {0x63,90}  // Native envelope field: part +14.
+        }};
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto port=static_cast<uint8_t>(part/g_groupSize);
+            const auto status=static_cast<uint8_t>(0xb0 | (part%g_groupSize));
+            send(*nrpnSource,port,status,99,1);
+            for(const auto [selector,value]:nrpnEdits)
+            {
+                send(*nrpnSource,port,status,98,selector);
+                send(*nrpnSource,port,status,6,value);
+            }
+        }
+        run(*nrpnSource,g_drainSamples);
+        std::vector<uint8_t> nrpnImage;
+        check(Sc88Settings::capture(*nrpnSource,nrpnImage)==Result::Success,
+              "capture native NRPN image");
+        if(nrpnImage.size()!=Sc88::SramSize)
+            throw std::runtime_error("native NRPN image has invalid size");
+        auto nrpnRestored=std::make_unique<Sc88>(rom,waves,model,false);
+        check(Sc88Settings::restore(*nrpnRestored,nrpnImage)==Result::Success,
+              "restore native NRPN image");
+        size_t nrpnNativeMismatch{}, nrpnLost{};
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto stride=2*part;
+            const auto base=(part<g_groupSize?size_t{0x8088}:size_t{0x9588})+
+                            (part%g_groupSize)*0x70;
+            const std::array<std::pair<size_t,uint8_t>,3> selectors{{
+                {0xd920+stride,1},{0xd921+stride,0x63},{0xd861+stride,0}}};
+            for(const auto [address,expected]:selectors)
+            {
+                if(nrpnImage.at(address)!=expected && nrpnNativeMismatch<10)
+                    std::cout << "NRPN-native-field part=" << part << " address=" << std::hex
+                              << address << std::dec << " actual=" << unsigned(nrpnImage.at(address))
+                              << " expected=" << unsigned(expected) << '\n';
+                nrpnNativeMismatch += nrpnImage.at(address)!=expected;
+                nrpnLost += Sc88ExecutionProbe::ram(*nrpnRestored)[address]!=nrpnImage.at(address);
+            }
+            for(const auto [offset,expected]:std::array<std::pair<size_t,uint8_t>,3>{{
+                    {0x10,73},{0x12,81},{0x14,90}}})
+            {
+                if(nrpnImage.at(base+offset)!=expected && nrpnNativeMismatch<10)
+                    std::cout << "NRPN-native-field part=" << part << " address=" << std::hex
+                              << base+offset << std::dec << " actual=" << unsigned(nrpnImage.at(base+offset))
+                              << " expected=" << unsigned(expected) << '\n';
+                nrpnNativeMismatch += nrpnImage.at(base+offset)!=expected;
+                nrpnLost += Sc88ExecutionProbe::ram(*nrpnRestored)[base+offset]!=
+                            nrpnImage.at(base+offset);
+            }
+        }
+        std::cout << "NRPN-tone native-mismatches=" << nrpnNativeMismatch
+                  << " lost-on-restore=" << nrpnLost << '\n';
+        check(nrpnNativeMismatch==0,"native NRPN edits reach verified part fields/selectors");
+        check(nrpnLost==0,"restore native NRPN part fields/selectors");
+        // Each part must keep its NRPN selection for the next CC6.
+        for(size_t part{};part<g_partCount;++part)
+            for(auto* board:{nrpnSource.get(),nrpnRestored.get()})
+                send(*board,static_cast<uint8_t>(part/g_groupSize),
+                     static_cast<uint8_t>(0xb0 | (part%g_groupSize)),6,91);
+        run(*nrpnSource,g_drainSamples);
+        run(*nrpnRestored,g_drainSamples);
+        size_t nrpnContinuationMismatch{};
+        for(size_t part{};part<g_partCount;++part)
+            for(const auto* board:{nrpnSource.get(),nrpnRestored.get()})
+            {
+                const auto& ram=Sc88ExecutionProbe::ram(*board);
+                nrpnContinuationMismatch += ram[0xd920+2*part]!=1 ||
+                                            ram[0xd921+2*part]!=0x63 ||
+                                            ram[0xd861+2*part]!=0;
+            }
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto base=(part<g_groupSize?size_t{0x8088}:size_t{0x9588})+
+                            (part%g_groupSize)*0x70;
+            for(const auto* board:{nrpnSource.get(),nrpnRestored.get()})
+                nrpnContinuationMismatch += Sc88ExecutionProbe::ram(*board)[base+0x14]!=91;
+        }
+        std::cout << "NRPN-tone next-data-entry-mismatches=" << nrpnContinuationMismatch << '\n';
+        check(nrpnContinuationMismatch==0,
+              "next native NRPN data entry retains selectors and envelope target");
     }
     if(!isolateHistory) for(uint8_t savedPreference : {uint8_t{0},uint8_t{1}})
     {
