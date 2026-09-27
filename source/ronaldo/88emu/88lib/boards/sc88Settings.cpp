@@ -56,6 +56,11 @@ namespace emu88Lib
 		// native initialization resets it (SC 01:D38A, VL 07:C605).
 		constexpr size_t g_sc88SelectedIndex = 0x56f2;
 		constexpr size_t g_sc88vlSelectedIndex = 0x56fc;
+		// UserInst handlers SC 01:C784 / VL 01:BED3 request page3;
+		// display workers 01:A750/01:9A9D publish it into these current-page bytes.
+		constexpr size_t g_sc88PanelPage = 0x54d2;
+		constexpr size_t g_sc88vlPanelPage = 0x54da;
+		constexpr uint8_t g_userInstrumentPage = 3;
 		// Match the native panel gesture timing used by the Pro adapter and
 		// Sc88::runFactoryReset, allowing the scanner to consume each edge.
 		constexpr unsigned g_panelPressSamples = g_sampleRate / 10;
@@ -65,6 +70,13 @@ namespace emu88Lib
 		constexpr std::array<size_t,2> g_partRecordBases{0x8088,0x9588};
 		constexpr size_t g_partsPerGroup = g_parts / g_partRecordBases.size();
 		constexpr size_t g_partRecordStride = 0x70;
+		// Secondary record pointers: SC 01:0A64..0A8E, VL 01:0B30..0B5A.
+		// User-tone loaders SC 00:2E02 and VL 01:2B68 replace eight edit
+		// bytes at +6 even after the preserved-settings boot path is chosen.
+		constexpr std::array<size_t,2> g_secondaryBases{0x87c8,0x9cc8};
+		constexpr size_t g_secondaryStride = 0x20;
+		constexpr size_t g_userToneOffset = 6;
+		constexpr size_t g_userToneBytes = 8;
 		// RPN fine-tuning MSB/LSB mirrors written by SC 3493/326F and
 		// VL 3571/3340. Boot resets them independently of retained settings.
 		constexpr std::array<size_t,2> g_fineTuneMirrors{0x2b,0x37};
@@ -91,6 +103,14 @@ namespace emu88Lib
 		{
 			return static_cast<uint16_t>((uint16_t{bytes[address]} << g_byteBits) |
 			                             bytes[address + sizeof(uint8_t)]);
+		}
+		void pressPanel(Sc88& board, uint32_t buttons)
+		{
+			// Reuse the native scanner so descriptor and display ownership stays local.
+			board.setButtons(buttons);
+			for(unsigned sample{};sample<g_panelPressSamples;++sample) board.renderSample();
+			board.setButtons(uint32_t{});
+			for(unsigned sample{};sample<g_panelReleaseSamples;++sample) board.renderSample();
 		}
 
 	}
@@ -119,6 +139,7 @@ namespace emu88Lib
 		const auto voiceOwner = board.m_model == Model::Sc88 ? g_sc88VoiceOwnerStart : g_sc88vlVoiceOwnerStart;
 		const auto switches = board.m_model == Model::Sc88 ? g_sc88SwitchBase : g_sc88vlSwitchBase;
 		const auto selectedIndex = board.m_model == Model::Sc88 ? g_sc88SelectedIndex : g_sc88vlSelectedIndex;
+		const auto panelPage = board.m_model == Model::Sc88 ? g_sc88PanelPage : g_sc88vlPanelPage;
 		const auto savedSelection = readWord(image,selectedIndex);
 		if(savedSelection >= g_parts) return Result::InvalidImage;
 		std::array<uint8_t,g_meterCount> freshMeters{};
@@ -137,16 +158,24 @@ namespace emu88Lib
 		for(unsigned sample{}; sample < g_bootSamples; ++sample) board.renderSample();
 		if(board.m_sram[g_bootGate] != g_preserveSettings) return Result::InvalidImage;
 		board.m_sram[g_batteryPreference] = image[g_batteryPreference];
+		// Preserve unsaved UserInst edits before firmware reconstructs the UI
+		// descriptors; boot may reload the stored user tone over its edit buffer.
+		for(size_t part{};part<g_parts;++part)
+		{
+			const auto address=g_secondaryBases[part/g_partsPerGroup]+
+			                   (part%g_partsPerGroup)*g_secondaryStride+g_userToneOffset;
+			std::copy_n(image.begin()+address,g_userToneBytes,board.m_sram.begin()+address);
+		}
 		// Let firmware rebuild the selected part's descriptors and LCD rather
 		// than transplanting UI pointers into a fresh machine.
 		for(size_t move{};move<g_parts && readWord(board.m_sram,selectedIndex)!=savedSelection;++move)
-		{
-			board.setButton(Button::PartR,true);
-			for(unsigned sample{};sample<g_panelPressSamples;++sample) board.renderSample();
-			board.setButtons(uint32_t{});
-			for(unsigned sample{};sample<g_panelReleaseSamples;++sample) board.renderSample();
-		}
+			pressPanel(board,buttonBit(Button::PartR));
 		if(readWord(board.m_sram,selectedIndex)!=savedSelection) return Result::InvalidImage;
+		if(image[panelPage]==g_userInstrumentPage && board.m_sram[panelPage]!=g_userInstrumentPage)
+		{
+			pressPanel(board,buttonBit(Button::UserInst));
+			if(board.m_sram[panelPage]!=g_userInstrumentPage) return Result::InvalidImage;
+		}
 		std::copy_n(image.begin()+g_polyPressureBase,g_parts*g_polyPressureKeys,
 		            board.m_sram.begin()+g_polyPressureBase);
 		// The boot routines still reset receive controllers with C092 set.
