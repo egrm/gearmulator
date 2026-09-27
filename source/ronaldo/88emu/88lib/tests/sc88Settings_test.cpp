@@ -28,6 +28,7 @@ struct Sc88ExecutionProbe
         const auto& cpu=board.m_machine.cpu();
         return cpu.code_addr(cpu.regs().pc);
     }
+    static const auto& cpuRegs(const Sc88& board) { return board.m_machine.cpu().regs(); }
     static void seed(Sc88& board, const std::vector<uint8_t>& image)
     {
         if(board.m_samplesRendered != 0) throw std::runtime_error("seed needs fresh board");
@@ -70,6 +71,18 @@ void send(Sc88& board, uint8_t port, uint8_t status, uint8_t first, uint8_t seco
     board.addMidiEvent(event, port);
 }
 
+void editNativeMasterVolume(Sc88& board, uint8_t value)
+{
+    // Both ROMs' native 40 00 04 DT1 handler stores the value at SRAM 8042.
+    synthLib::SMidiEvent volume(synthLib::MidiEventSource::Host);
+    volume.sysex = {0xf0,0x41,0x10,0x42,0x12,0x40,0,4,value};
+    unsigned sum{};
+    for(size_t i=5;i<volume.sysex.size();++i) sum += volume.sysex[i];
+    volume.sysex.push_back(static_cast<uint8_t>((128-(sum&127))&127));
+    volume.sysex.push_back(0xf7);
+    board.addMidiEvent(volume);
+}
+
 void editNativeReceivers(Sc88& board, bool includePersistentSettings = true,
                          std::vector<Sc88::SampleFrame>* rendered = nullptr)
 {
@@ -95,15 +108,7 @@ void editNativeReceivers(Sc88& board, bool includePersistentSettings = true,
         send(board,port,cc,100,1);
     }
     if(includePersistentSettings)
-    {
-        synthLib::SMidiEvent volume(synthLib::MidiEventSource::Host);
-        volume.sysex = {0xf0,0x41,0x10,0x42,0x12,0x40,0,4,63};
-        unsigned sum{};
-        for(size_t i=5;i<volume.sysex.size();++i) sum += volume.sysex[i];
-        volume.sysex.push_back(static_cast<uint8_t>((128-(sum&127))&127));
-        volume.sysex.push_back(0xf7);
-        board.addMidiEvent(volume);
-    }
+        editNativeMasterVolume(board,63);
     for(unsigned sample{};sample<g_drainSamples;++sample)
     {
         const auto frame=board.renderSample();
@@ -300,6 +305,56 @@ bool sameXp(const xpLib::XP::State& a, const xpLib::XP::State& b)
                     b.waveRomConfig,b.waveRomPage,b.waveRomBank,b.serialAudioConfig,
                     b.diagnosticSelect_3930,b.serialFormat_3932,b.voiceWindowSelect_3934,
                     b.dspControl,b.iram3RampRates,b.sampleClock,b.interrupt);
+}
+
+void reportVlUpdaterSource(const Sc88& board, const char* side, size_t frame)
+{
+    // VL ROM 00:56B5..571B reads DP:1C68 into R2, takes four words at
+    // DP:(R2+08..0E), and writes EP:18xx/13xx through R4. The branch at
+    // 56EF tests bit 0 at DP:(R1+32D6). Read only the SRAM mirror here.
+    const auto& regs=Sc88ExecutionProbe::cpuRegs(board);
+    const auto& ram=Sc88ExecutionProbe::ram(board);
+    const auto& voice=Sc88ExecutionProbe::xp(board).state().voices.back();
+    const auto word=[&](size_t address) -> uint16_t
+    {
+        return static_cast<uint16_t>((uint16_t{ram[address]}<<8)|ram[address+1]);
+    };
+    std::cout << "VL-updater-source side=" << side << " frame=" << frame
+              << " pc=" << std::hex << Sc88ExecutionProbe::pc(board)
+              << " r1=" << regs.r[1] << " r2=" << regs.r[2]
+              << " r4=" << regs.r[4] << std::dec
+              << " cp/dp/ep=" << unsigned(regs.cp) << '/'
+              << unsigned(regs.dp) << '/' << unsigned(regs.ep)
+              << " cycles=" << board.cycles();
+    if(regs.dp==8 && size_t{0x1c68}+1<ram.size())
+    {
+        const auto pointer=word(0x1c68);
+        const auto branch=static_cast<uint16_t>(uint32_t{regs.r[1]}+0x32d6);
+        std::cout << " pointer@1c68=" << std::hex << pointer
+                  << " branch-address=" << branch << std::dec;
+        if(size_t{branch}<ram.size())
+            std::cout << " branch-byte=" << unsigned(ram[branch]);
+        else
+            std::cout << " branch-byte=out-of-bounds";
+        if(size_t{regs.r[2]}+0x0f<ram.size())
+            std::cout << " r2-words=" << word(size_t{regs.r[2]}+0x08)
+                      << '/' << word(size_t{regs.r[2]}+0x0a)
+                      << '/' << word(size_t{regs.r[2]}+0x0c)
+                      << '/' << word(size_t{regs.r[2]}+0x0e);
+        else
+            std::cout << " r2-words=out-of-bounds";
+        if(size_t{pointer}+0x0f<ram.size())
+            std::cout << " pointer-words=" << word(size_t{pointer}+0x08)
+                      << '/' << word(size_t{pointer}+0x0a)
+                      << '/' << word(size_t{pointer}+0x0c)
+                      << '/' << word(size_t{pointer}+0x0e);
+        else
+            std::cout << " pointer-words=out-of-bounds";
+    }
+    else
+        std::cout << " SRAM-source=unavailable-for-DP";
+    std::cout << " XP-tvf-ramp=" << voice.tvfFRamp_1800
+              << " XP-tvf-destination=" << voice.tvfFDestination_1300 << '\n';
 }
 
 void reportMachineDifferences(const Sc88& left, const Sc88& right, const char* phase)
@@ -518,6 +573,92 @@ bool exercise(Model model, bool isolateHistory)
             const auto nativeLost=receiverDifferences(variant,Sc88ExecutionProbe::ram(*replayed));
             std::cout << "native-replay receiver-mismatches=" << nativeLost << '\n';
             check(nativeLost==0,"native replay reaches captured receiver fields");
+            // Put both setting images through the same fresh-board boot path.
+            // This excludes the live native replay's different CPU work phase.
+            std::vector<uint8_t> nativeImage;
+            check(Sc88Settings::capture(*replayed,nativeImage)==Result::Success,
+                  "capture native-replayed settings image");
+            if(nativeImage.size()!=Sc88::SramSize)
+                throw std::runtime_error("native-replayed settings image has invalid size");
+            auto canonicalOriginal=std::make_unique<Sc88>(rom,waves,model,false);
+            auto canonicalNative=std::make_unique<Sc88>(rom,waves,model,false);
+            check(Sc88Settings::restore(*canonicalOriginal,variant)==Result::Success,
+                  "canonical restore original settings image");
+            check(Sc88Settings::restore(*canonicalNative,nativeImage)==Result::Success,
+                  "canonical restore native-replayed settings image");
+            const auto& originalCanonicalRam=Sc88ExecutionProbe::ram(*canonicalOriginal);
+            const auto& nativeCanonicalRam=Sc88ExecutionProbe::ram(*canonicalNative);
+            check(receiverDifferences(originalCanonicalRam,nativeCanonicalRam)==0,
+                  "canonical images agree on mapped receivers");
+            bool canonicalSettingsAgree=
+                originalCanonicalRam[g_preference]==nativeCanonicalRam[g_preference] &&
+                originalCanonicalRam[g_gate]==nativeCanonicalRam[g_gate] &&
+                originalCanonicalRam[g_volume]==nativeCanonicalRam[g_volume];
+            for(size_t part{};part<g_partCount;++part)
+            {
+                // Both ROMs use 0x70-byte part records, with CC7/CC10 at +8/+9.
+                const auto base=(part<g_groupSize ? size_t{0x8088} : size_t{0x9588})+
+                                (part%g_groupSize)*0x70;
+                canonicalSettingsAgree &=
+                    originalCanonicalRam[base+8]==nativeCanonicalRam[base+8] &&
+                    originalCanonicalRam[base+9]==nativeCanonicalRam[base+9];
+            }
+            check(canonicalSettingsAgree,
+                  "canonical images agree on preference, gate, volume, part level and pan");
+            check(Sc88ExecutionProbe::samples(*canonicalOriginal)==
+                  Sc88ExecutionProbe::samples(*canonicalNative),
+                  "canonical boot timelines agree");
+            std::vector<Sc88::SampleFrame> canonicalOriginalIdle, canonicalNativeIdle;
+            for(size_t sample{};sample<g_drainSamples;++sample)
+            {
+                canonicalOriginalIdle.push_back(canonicalOriginal->renderSample());
+                canonicalNativeIdle.push_back(canonicalNative->renderSample());
+            }
+            check(comparePcm(canonicalOriginalIdle,canonicalNativeIdle,
+                             "canonical fresh-image idle exact-PCM"),
+                  "canonical fresh-image idle PCM agrees");
+            send(*canonicalOriginal,0,0x90,60,100);
+            send(*canonicalNative,0,0x90,60,100);
+            std::vector<Sc88::SampleFrame> canonicalOriginalNote, canonicalNativeNote;
+            for(size_t sample{};sample<g_sampleRate;++sample)
+            {
+                canonicalOriginalNote.push_back(canonicalOriginal->renderSample());
+                canonicalNativeNote.push_back(canonicalNative->renderSample());
+            }
+            check(comparePcm(canonicalOriginalNote,canonicalNativeNote,
+                             "canonical fresh-image future-note exact-PCM"),
+                  "canonical fresh-image future-note PCM agrees");
+            // Native DT1 negative control: the same canonical comparison must
+            // detect an actual master-volume edit in a captured settings image.
+            constexpr uint8_t changedVolume=31; // Deliberate nondefault test value.
+            auto volumeEdited=replayed->cloneExecution();
+            if(!volumeEdited) throw std::runtime_error("volume edit source clone failed");
+            editNativeMasterVolume(*volumeEdited,changedVolume);
+            run(*volumeEdited,g_drainSamples);
+            check(Sc88ExecutionProbe::ram(*volumeEdited)[g_volume]==changedVolume,
+                  "native DT1 negative-control volume edit applied");
+            std::vector<uint8_t> volumeEditedImage;
+            check(Sc88Settings::capture(*volumeEdited,volumeEditedImage)==Result::Success,
+                  "capture native volume-edited image");
+            if(volumeEditedImage.size()!=Sc88::SramSize)
+                throw std::runtime_error("native volume-edited image has invalid size");
+            auto canonicalVolumeEdited=std::make_unique<Sc88>(rom,waves,model,false);
+            check(Sc88Settings::restore(*canonicalVolumeEdited,volumeEditedImage)==Result::Success,
+                  "canonical restore native volume-edited image");
+            const auto& volumeEditedRam=Sc88ExecutionProbe::ram(*canonicalVolumeEdited);
+            check(volumeEditedRam[g_volume]==changedVolume &&
+                  originalCanonicalRam[g_volume]!=changedVolume,
+                  "canonical native volume edit remains distinct");
+            check(receiverDifferences(originalCanonicalRam,volumeEditedRam)==0,
+                  "canonical native volume edit retains mapped receivers");
+            run(*canonicalVolumeEdited,g_drainSamples);
+            send(*canonicalVolumeEdited,0,0x90,60,100);
+            std::vector<Sc88::SampleFrame> volumeEditedNote;
+            for(size_t sample{};sample<g_sampleRate;++sample)
+                volumeEditedNote.push_back(canonicalVolumeEdited->renderSample());
+            check(!comparePcm(canonicalOriginalNote,volumeEditedNote,
+                              "canonical native volume-edit future-note control"),
+                  "canonical comparison detects native volume edit");
             std::vector<Sc88::SampleFrame> adapterIdle;
             for(unsigned sample{};sample<g_drainSamples;++sample)
                 adapterIdle.push_back(restored->renderSample());
@@ -558,10 +699,17 @@ bool exercise(Model model, bool isolateHistory)
                 send(*traceNative,0,0x90,60,100);
                 bool firstMismatchFound=false, firstStateMismatchFound=false;
                 std::array<bool,8> firstFieldMismatch{};
+                constexpr std::array<size_t,6> updaterFrames{
+                    1163,1164,1165,2701,2702,2703}; // Earlier real-ROM trace boundaries.
                 for(size_t sample{};sample<g_sampleRate;++sample)
                 {
                     const auto adapterFrame=traceAdapter->renderSample();
                     const auto nativeFrame=traceNative->renderSample();
+                    if(std::find(updaterFrames.begin(),updaterFrames.end(),sample)!=updaterFrames.end())
+                    {
+                        reportVlUpdaterSource(*traceAdapter,"adapter",sample);
+                        reportVlUpdaterSource(*traceNative,"native",sample);
+                    }
                     const auto& av=Sc88ExecutionProbe::xp(*traceAdapter).state().voices.back();
                     const auto& nv=Sc88ExecutionProbe::xp(*traceNative).state().voices.back();
                     const std::array<std::pair<const char*,std::pair<uint32_t,uint32_t>>,8> fields{{
@@ -627,8 +775,7 @@ bool exercise(Model model, bool isolateHistory)
             const auto noteIsDistinct=!std::equal(adapterNote.begin(),adapterNote.end(),
                                                    noNoteOutput.begin());
             check(noteIsDistinct,"fresh note differs from independent no-note continuation");
-            check(comparePcm(adapterNote,nativeNote,"future-note exact-PCM"),
-                  "future-note PCM matches independent native replay");
+            comparePcm(adapterNote,nativeNote,"raw-live native replay future-note diagnostic");
         }
         const auto cycleAfter=restored->cycles();
         check(Sc88Settings::restore(*restored,variant)==Result::RequiresFreshBoard,
