@@ -547,38 +547,76 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
         passed &= condition;
     };
     require(wait(live,"initial-A1"),"source A1 panel did not settle");
-    auto sourceA1=live.cloneExecution();
-    auto sourceA2=live.cloneExecution();
-    require(sourceA1 && sourceA2,"panel source clones unavailable");
-    require(press(*sourceA2,Button::PartR,"source-A2"),"source A2 panel did not settle");
-    std::array<std::vector<uint8_t>,2> images;
-    std::array<std::string,2> sourceLcd;
-    std::array<std::vector<size_t>,2> sourceTargets;
-    for(size_t selection{};selection<2;++selection)
+    // The secondary scanner pairing tables SC 07:A0EA and VL 07:BB08 map
+    // InstAll(6)+PartL(22) to event 2E. Normal-mode dispatch maps that event
+    // to SC C760 / VL BEAF, which toggles index bit 4 before deriving part.
+    const auto changeGroup=[&](Sc88& board)
     {
-        auto& source=selection==0?*sourceA1:*sourceA2;
-        sourceLcd[selection]=visible(source);
-        require(Sc88Settings::capture(source,images[selection])==Sc88Settings::Result::Success &&
-                images[selection].size()==Sc88::SramSize,"source panel image capture failed");
+        board.setButtons(buttonBit(Button::InstAll)|buttonBit(Button::PartL));
+        require(!panelCandidate(board,model),"candidate accepted new group chord");
+        run(board,g_sampleRate/10);
+        board.setButtons(0);
+        return wait(board,"source-B-group-chord");
+    };
+    std::array<std::unique_ptr<Sc88>,g_partCount> sources;
+    sources[0]=live.cloneExecution();
+    auto aPath=live.cloneExecution();
+    auto bPath=live.cloneExecution();
+    require(sources[0] && aPath && bPath,"panel source clones unavailable");
+    for(size_t index=1;index<g_groupPartCount;++index)
+    {
+        require(press(*aPath,Button::PartR,"source-A16-advance"),
+                "source A16 advance did not settle");
+        sources[index]=aPath->cloneExecution();
+    }
+    require(changeGroup(*bPath),"source B-group chord did not settle");
+    sources[g_groupPartCount]=bPath->cloneExecution();
+    for(size_t index=g_groupPartCount+1;index<g_partCount;++index)
+    {
+        require(press(*bPath,Button::PartR,"source-B16-advance"),
+                "source B16 advance did not settle");
+        sources[index]=bPath->cloneExecution();
+    }
+    constexpr size_t scPartTable=0x7a66e; // SC D2ED: 07:A66E[index].
+    constexpr size_t vlPartTable=0x7c3ee; // VL CA56: 07:C3EE[index].
+    const auto partTable=model==Model::Sc88?scPartTable:vlPartTable;
+    std::array<std::vector<uint8_t>,g_partCount> images;
+    std::array<std::string,g_partCount> sourceLcd;
+    std::array<std::vector<size_t>,g_partCount> sourceTargets;
+    for(size_t slot{};slot<sources.size();++slot)
+    {
+        require(bool(sources[slot]),"panel source selection clone unavailable");
+        auto& source=*sources[slot];
+        const auto selection=slot;
+        const auto groupPart=selection%g_groupPartCount+1;
+        const std::string label{
+            selection<g_groupPartCount?'A':'B',
+            static_cast<char>('0'+groupPart/10),
+            static_cast<char>('0'+groupPart%10)};
+        sourceLcd[slot]=visible(source);
+        require(Sc88Settings::capture(source,images[slot])==Sc88Settings::Result::Success &&
+                images[slot].size()==Sc88::SramSize,"source panel image capture failed");
         const auto before=Sc88ExecutionProbe::ram(source);
         std::cout << "panel-recall-source model=" << static_cast<int>(model)
                   << " selection=" << selection
                   << " index=" << word(before,indexAddress)
                   << " part=" << word(before,partAddress)
-                  << " lcd=" << printable(sourceLcd[selection]) << '\n';
+                  << " lcd=" << printable(sourceLcd[slot]) << '\n';
         check(word(before,indexAddress)==selection &&
-              word(before,partAddress)==selection+1,
+              word(before,partAddress)==rom.at(partTable+selection) &&
+              sourceLcd[slot].substr(0,3)==label,
               "native selected index/part disagrees with ROM mapping",0);
         require(press(source,Button::LevelR,"source-next-LevelR"),
                 "source LevelR panel did not settle");
-        sourceTargets[selection]=changedLevels(before,Sc88ExecutionProbe::ram(source));
-        check(sourceTargets[selection]==std::vector<size_t>{selection+1},
-              "native next LevelR target disagrees with selected part",0);
+        sourceTargets[slot]=changedLevels(before,Sc88ExecutionProbe::ram(source));
+        check(sourceTargets[slot].size()==1,
+              "native next LevelR did not edit exactly one part",0);
     }
     for(uint8_t preference : {uint8_t{0},uint8_t{1}})
-        for(size_t selection{};selection<2;++selection)
+        for(size_t slot{};slot<g_partCount;++slot)
         {
-            auto variant=images[selection];
+            const auto selection=slot;
+            auto variant=images[slot];
             variant[g_batteryPreference]=preference; // Test-only preference variant.
             auto restored=std::make_unique<Sc88>(rom,waves,model,false);
             const auto result=Sc88Settings::restore(*restored,variant);
@@ -597,7 +635,7 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
             check(word(before,indexAddress)==word(variant,indexAddress) &&
                   word(before,partAddress)==word(variant,partAddress),
                   "selected SRAM index/part lost",preference);
-            check(restoredLcd==sourceLcd[selection],
+            check(restoredLcd==sourceLcd[slot],
                   "selected LCD context lost",preference);
             const auto ready=wait(*restored,"restored-before-LevelR");
             check(ready,"restored panel candidate did not settle",preference);
@@ -611,7 +649,7 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
                       << " selection=" << selection << " parts=";
             for(const auto part:target) std::cout << part << ',';
             std::cout << '\n';
-            check(target==sourceTargets[selection],"next LevelR target lost",preference);
+            check(target==sourceTargets[slot],"next LevelR target lost",preference);
         }
     return passed;
 }
