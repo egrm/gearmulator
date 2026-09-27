@@ -46,6 +46,24 @@ Sc55SubMcu::Sc55SubMcu()
     reset();
 }
 
+bool Sc55SubMcu::hostInputDrained() const
+{
+    for(int input = SRC_A; input <= SRC_C; ++input)
+        if(m_s.inRd[input] != m_s.inWr[input]) return false;
+    for(int input = SRC_A; input <= SRC_B; ++input)
+    {
+        const auto& source = m_s.src[input];
+        if(source.rd != source.wr || source.pending || source.idx || source.cnt ||
+           source.expect2 || source.busy) return false;
+    }
+    const auto& computer = m_s.src[SRC_C];
+    if(m_s.rxCrd != m_s.rxCwr || computer.pending || computer.idx ||
+       computer.cnt || computer.expect2 || computer.busy) return false;
+    // putHost sets these flags; hostRead clears each only after the H8 has
+    // consumed that mailbox byte. Source: putHost/hostRead in this file.
+    return !flagGet(SH_TO_HOST0) && !flagGet(SH_TO_HOST1);
+}
+
 void Sc55SubMcu::reset()
 {
     memset(&m_s, 0, sizeof(m_s));

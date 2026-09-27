@@ -12,6 +12,10 @@ namespace emu88Lib
 		// Paired SC-55 1.21 H8 and program images in romRegistry.h:625-630.
 		constexpr baseLib::MD5 g_internal121("462cb3a2ce9e54f4e54a52f643931ffd");
 		constexpr baseLib::MD5 g_program121("6b61186953b50d900e430ae6a996bda7");
+		// romRegistry.h stock GS-28 2.00 pair, shared by SC-55mkII and SC-155mkII.
+		// The CTF variants have different program images and remain excluded.
+		constexpr baseLib::MD5 g_mk2Internal("4ca058f7db05f51e97bb30a162e9610a");
+		constexpr baseLib::MD5 g_mk2Program("63b24c7193ce34afefce9cec32ac39f0");
 		// Match the existing player fast-boot interval in hardwareDevice.cpp:34.
 		// The native 1.21 battery experiment also read back the edited fields
 		// after one second; this longer established boot path is conservative.
@@ -127,5 +131,34 @@ namespace emu88Lib
 		   board.m_sram[g_volumePartOne] != image[g_volumePartOne])
 			return Result::InvalidImage;
 		return Result::Success;
+	}
+
+	bool Sc55Settings::probeMk2Image(const Sc55Board& board, std::vector<uint8_t>& image)
+	{
+		if(!board.m_valid || board.m_roms.model != DeviceModel::Sc55Mk2 ||
+		   board.m_internalRomHash != g_mk2Internal ||
+		   board.m_programRomHash != g_mk2Program) return false;
+		image = board.m_sram;
+		return true;
+	}
+
+	bool Sc55Settings::reopenMk2Probe(Sc55Board& board, const std::vector<uint8_t>& image)
+	{
+		std::vector<uint8_t> check;
+		if(!probeMk2Image(board, check) || image.size() != Sc55Board::SramSize ||
+		   board.m_samplesRendered != 0) return false;
+		board.m_sram = image;
+		board.powerCycle();
+		for(uint32_t sample = 0; sample < g_bootSeconds * board.sampleRate(); ++sample)
+			board.renderSample();
+		return true;
+	}
+
+	bool Sc55Settings::probeMk2InputDrained(const Sc55Board& board)
+	{
+		return board.m_valid && board.m_roms.model == DeviceModel::Sc55Mk2 &&
+		       board.m_internalRomHash == g_mk2Internal &&
+		       board.m_programRomHash == g_mk2Program &&
+		       board.m_subMcu.hostInputDrained();
 	}
 }

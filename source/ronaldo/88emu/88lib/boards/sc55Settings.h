@@ -19,5 +19,11 @@ namespace emu88Lib
 		static bool isCaptureBoundary(Sc55Board& board);
 		static Result capture(Sc55Board& board, std::vector<uint8_t>& image);
 		static Result restore(Sc55Board& board, const std::vector<uint8_t>& image);
+		// Diagnostic gate for the exact stock mkII ROM pair. These deliberately
+		// bypass the unproved mkII input boundary and are never host adapters.
+		// The focused ROM test uses them to establish or reject SRAM boot retention.
+		static bool probeMk2Image(const Sc55Board& board, std::vector<uint8_t>& image);
+		static bool reopenMk2Probe(Sc55Board& board, const std::vector<uint8_t>& image);
+		static bool probeMk2InputDrained(const Sc55Board& board);
 	};
 }

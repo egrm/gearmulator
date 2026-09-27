@@ -163,6 +163,11 @@ public:
     void postMidiIn2(uint8_t data)  { pushInput(SRC_B, data); }
     void postComputer(uint8_t data) { pushInput(SRC_C, data); }
 
+    // Every inbound byte has reached the main H8 and been read from its
+    // mailbox. This is a wire/sub-MCU barrier only; the firmware's own
+    // receive queue and parameter handlers require a separate boundary.
+    bool hostInputDrained() const;
+
 private:
 
     void    pushInput(int src, uint8_t data);
