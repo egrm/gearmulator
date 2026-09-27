@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <map>
+#include <string>
 #include <string_view>
 #include <stdexcept>
 #include <vector>
@@ -292,13 +293,13 @@ bool panelCandidate(const Sc88& board, Model model)
 
 void tracePanelCandidate(Sc88& board, Model model)
 {
-    const auto wait=[&](const char* phase)
+    const auto wait=[&](Sc88& target, const char* phase)
     {
         for(unsigned elapsed{};elapsed<g_sampleRate;++elapsed)
         {
-            if(panelCandidate(board,model))
+            if(panelCandidate(target,model))
             {
-                const auto& ram=Sc88ExecutionProbe::ram(board);
+                const auto& ram=Sc88ExecutionProbe::ram(target);
                 std::cout << "panel-candidate model=" << static_cast<int>(model)
                           << " phase=" << phase << " samples=" << elapsed
                           << " level=" << unsigned(ram[0x8088+g_partLevelOffset])
@@ -306,18 +307,66 @@ void tracePanelCandidate(Sc88& board, Model model)
                           << ',' << unsigned(ram[0x75af]) << '\n';
                 return;
             }
-            board.renderSample();
+            target.renderSample();
         }
         throw std::runtime_error("panel candidate did not settle within diagnostic interval");
     };
-    wait("initial");
+    const auto visible=[](const Sc88& target)
+    {
+        const auto& lcd=target.lcd();
+        std::string text(lcd.getVisibleColumns()*lcd.getVisibleLines(),' ');
+        lcd.copyVisibleDdRam(text.data());
+        for(auto& cell : text)
+            if(static_cast<unsigned char>(cell)<32 || static_cast<unsigned char>(cell)>126)
+                cell='.';
+        return text;
+    };
+    const auto press=[&](Sc88& target, Button button, const char* phase)
+    {
+        target.setButton(button,true);
+        require(!panelCandidate(target,model),"candidate accepted unscanned key press");
+        // Existing native reset gesture's press interval; every edge is released.
+        run(target,g_sampleRate/10);
+        target.setButtons(0);
+        wait(target,phase);
+    };
+    const auto changes=[&](const std::vector<uint8_t>& before,
+                           const std::vector<uint8_t>& after, size_t field,
+                           const char* phase)
+    {
+        std::vector<size_t> changed;
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto base=(part<g_groupPartCount?0x8088:0x9588)+
+                            (part%g_groupPartCount)*g_partRecordBytes;
+            if(before[base+field]==after[base+field]) continue;
+            changed.push_back(part);
+            std::cout << "panel-field phase=" << phase << " part=" << part
+                      << " before=" << unsigned(before[base+field])
+                      << " after=" << unsigned(after[base+field]) << '\n';
+        }
+        return changed;
+    };
+    const auto stable=[&](Sc88& target, const std::vector<uint8_t>& captured,
+                          size_t field, const char* phase)
+    {
+        run(target,g_stabilitySamples);
+        const auto& after=Sc88ExecutionProbe::ram(target);
+        require(changes(captured,after,field,phase).empty(),
+                "panel candidate preceded a delayed field edit");
+    };
+    wait(board,"initial");
+    auto panBoard=board.cloneExecution();
+    auto partBoard=board.cloneExecution();
+    auto repeatedBoard=board.cloneExecution();
+    require(panBoard && partBoard && repeatedBoard,"independent panel clones unavailable");
     const auto before=Sc88ExecutionProbe::ram(board);
     board.setButton(Button::LevelR,true);
     require(!panelCandidate(board,model),"candidate accepted unscanned key press");
     // Same native press duration used by the existing board reset gesture.
     run(board,g_sampleRate/10);
     board.setButtons(0);
-    wait("released-edit");
+    wait(board,"released-edit");
     const auto edited=Sc88ExecutionProbe::ram(board);
     size_t changedLevels{};
     for(size_t part{};part<g_partCount;++part)
@@ -343,7 +392,7 @@ void tracePanelCandidate(Sc88& board, Model model)
     volume.a=0xb0; volume.b=7; volume.c=63;
     board.addMidiEvent(volume);
     require(!panelCandidate(board,model),"candidate accepted pending MIDI");
-    wait("immediate-midi");
+    wait(board,"immediate-midi");
     const auto midiCandidate=Sc88ExecutionProbe::ram(board);
     run(board,g_sampleRate);
     size_t midiChanges{};
@@ -363,6 +412,69 @@ void tracePanelCandidate(Sc88& board, Model model)
                 "candidate preceded the accepted MIDI edit");
     }
     require(midiChanges!=0,"MIDI edit changed no part levels");
+
+    // PanR runs from the same initial execution state as LevelR. The only
+    // asserted semantic field is the ROM-mapped CC10 part pan at record +9.
+    const auto panBefore=Sc88ExecutionProbe::ram(*panBoard);
+    const auto panLcdBefore=visible(*panBoard);
+    press(*panBoard,Button::PanR,"released-pan-right");
+    const auto panAfter=Sc88ExecutionProbe::ram(*panBoard);
+    const auto panParts=changes(panBefore,panAfter,g_partPanOffset,"pan-right");
+    std::cout << "panel-pan changed-parts=" << panParts.size()
+              << " lcd-before=" << panLcdBefore
+              << " lcd-after=" << visible(*panBoard) << '\n';
+    require(!panParts.empty(),"PanR changed no ROM-mapped part pan");
+    stable(*panBoard,panAfter,g_partPanOffset,"pan-right-stability");
+
+    // A PartR edge should select another part. The LCD is the independently
+    // observable selection evidence; a subsequent LevelR reveals its target.
+    const auto partBefore=Sc88ExecutionProbe::ram(*partBoard);
+    const auto partLcdBefore=visible(*partBoard);
+    press(*partBoard,Button::PartR,"released-part-right");
+    const auto partAfter=Sc88ExecutionProbe::ram(*partBoard);
+    const auto partLcdAfter=visible(*partBoard);
+    std::cout << "panel-part lcd-before=" << partLcdBefore
+              << " lcd-after=" << partLcdAfter << '\n';
+    require(partLcdBefore!=partLcdAfter,
+            "PartR selection is not evidenced by visible LCD change");
+    require(changes(partBefore,partAfter,g_partLevelOffset,"part-right-level").empty() &&
+            changes(partBefore,partAfter,g_partPanOffset,"part-right-pan").empty(),
+            "PartR unexpectedly edited mapped level or pan");
+    run(*partBoard,g_stabilitySamples);
+    const auto partStableLcd=visible(*partBoard);
+    std::cout << "panel-part one-second-lcd=" << partStableLcd << '\n';
+    require(changes(partAfter,Sc88ExecutionProbe::ram(*partBoard),g_partLevelOffset,
+                    "part-right-level-stability").empty() &&
+            changes(partAfter,Sc88ExecutionProbe::ram(*partBoard),g_partPanOffset,
+                    "part-right-pan-stability").empty(),
+            "PartR preceded a delayed mapped level or pan edit");
+    require(partStableLcd==partLcdAfter,"PartR selection LCD did not remain stable");
+    press(*partBoard,Button::LevelR,"part-right-then-level-right");
+    const auto selectedLevel=Sc88ExecutionProbe::ram(*partBoard);
+    const auto selectedParts=changes(partAfter,selectedLevel,g_partLevelOffset,
+                                     "selected-level-right");
+    std::cout << "panel-part selected-level-parts=" << selectedParts.size() << '\n';
+    require(!selectedParts.empty(),"PartR selected part has no observable LevelR target");
+    require(selectedParts!=changes(before,edited,g_partLevelOffset,"initial-level-target"),
+            "PartR did not change the LevelR target part");
+    stable(*partBoard,selectedLevel,g_partLevelOffset,"selected-level-stability");
+
+    // Two released LevelR edges independently test that a second press is
+    // consumed before each candidate, with no later level edit after either.
+    const auto repeatedBefore=Sc88ExecutionProbe::ram(*repeatedBoard);
+    press(*repeatedBoard,Button::LevelR,"first-repeated-level-right");
+    const auto firstLevel=Sc88ExecutionProbe::ram(*repeatedBoard);
+    const auto firstParts=changes(repeatedBefore,firstLevel,g_partLevelOffset,
+                                  "first-repeated-level-right");
+    require(!firstParts.empty(),"first repeated LevelR made no mapped edit");
+    stable(*repeatedBoard,firstLevel,g_partLevelOffset,"first-level-stability");
+    press(*repeatedBoard,Button::LevelR,"second-repeated-level-right");
+    const auto secondLevel=Sc88ExecutionProbe::ram(*repeatedBoard);
+    const auto secondParts=changes(firstLevel,secondLevel,g_partLevelOffset,
+                                   "second-repeated-level-right");
+    require(!secondParts.empty(),"second repeated LevelR made no mapped edit");
+    require(firstParts==secondParts,"repeated LevelR changed target part unexpectedly");
+    stable(*repeatedBoard,secondLevel,g_partLevelOffset,"second-level-stability");
 }
 
 bool exercise(Model model, std::string_view mode)
