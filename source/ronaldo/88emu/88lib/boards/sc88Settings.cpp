@@ -42,6 +42,10 @@ namespace emu88Lib
 		// foundation needs a model-specific readiness predicate before host use.
 		constexpr unsigned g_bootSamples = g_sampleRate * 10;
 		constexpr size_t g_parts = 32; // Both ROM boot loops address two groups of 16.
+		// SC 00:30C4/3585 and VL 00:3195/3663 write/reset 128 per-key
+		// pressure bytes per part. These receive values are separate from voices.
+		constexpr size_t g_polyPressureBase = 0xc660;
+		constexpr size_t g_polyPressureKeys = 128;
 		constexpr size_t g_partStride = sizeof(uint16_t); // R3 is doubled part index.
 		constexpr auto g_byteBits = std::numeric_limits<uint8_t>::digits;
 		// SC-88 handlers 30EC..326E and VL 31BD..333F. Controller values are
@@ -106,10 +110,13 @@ namespace emu88Lib
 		for(unsigned sample{}; sample < g_bootSamples; ++sample) board.renderSample();
 		if(board.m_sram[g_bootGate] != g_preserveSettings) return Result::InvalidImage;
 		board.m_sram[g_batteryPreference] = image[g_batteryPreference];
+		std::copy_n(image.begin()+g_polyPressureBase,g_parts*g_polyPressureKeys,
+		            board.m_sram.begin()+g_polyPressureBase);
 		// The boot routines still reset receive controllers with C092 set.
 		// Restore only source-verified per-part receiver bytes, then reproduce
 		// the native handlers' dirty-mask ORs so dependent DSP state recomputes.
-		// Voice-event queues and per-key history are deliberately fresh.
+		// Voice-event queues and voice/key ownership history remain fresh;
+		// the source-verified poly-pressure receive array is restored above.
 		for(size_t part{}; part < g_parts; ++part)
 		{
 			const auto stride = part * g_partStride;

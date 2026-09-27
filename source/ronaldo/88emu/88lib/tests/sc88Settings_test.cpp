@@ -506,6 +506,41 @@ bool exercise(Model model, bool isolateHistory)
     std::cout << "model=" << static_cast<int>(model)
               << " captured-C072=" << unsigned(image[g_preference]) << '\n';
 
+    if(!isolateHistory)
+    {
+        // SC 30C4/3585 and VL 3195/3663 address 128 pressure bytes per
+        // internal part at C660. Native input, not synthetic SRAM, sets them.
+        constexpr size_t pressureBase=0xc660;
+        constexpr size_t keys=128;
+        auto pressureSource=live->cloneExecution();
+        if(!pressureSource) throw std::runtime_error("pressure source clone failed");
+        for(size_t part{};part<g_partCount;++part)
+        {
+            for(size_t key{};key<keys;++key)
+                send(*pressureSource,static_cast<uint8_t>(part/g_groupSize),
+                     static_cast<uint8_t>(0xa0 | (part%g_groupSize)),
+                     static_cast<uint8_t>(key),static_cast<uint8_t>(1+key%127));
+            run(*pressureSource,g_drainSamples);
+        }
+        std::vector<uint8_t> pressureImage;
+        check(Sc88Settings::capture(*pressureSource,pressureImage)==Result::Success,
+              "capture native poly pressure");
+        size_t nativeMismatch{};
+        for(size_t part{};part<g_partCount;++part)
+            for(size_t key{};key<keys;++key)
+                nativeMismatch += pressureImage.at(pressureBase+part*keys+key)!=1+key%127;
+        check(nativeMismatch==0,"native poly pressure reaches all 4096 part/key values");
+        auto pressureRestored=std::make_unique<Sc88>(rom,waves,model,false);
+        check(Sc88Settings::restore(*pressureRestored,pressureImage)==Result::Success,
+              "restore native poly pressure image");
+        size_t lost{};
+        for(size_t offset{};offset<g_partCount*keys;++offset)
+            lost += Sc88ExecutionProbe::ram(*pressureRestored)[pressureBase+offset]!=
+                    pressureImage.at(pressureBase+offset);
+        std::cout << "poly-pressure native-mismatches=" << nativeMismatch
+                  << " lost-on-restore=" << lost << '\n';
+        check(lost==0,"restore all native per-key pressure values");
+    }
     if(!isolateHistory) for(uint8_t savedPreference : {uint8_t{0},uint8_t{1}})
     {
         currentPreference = savedPreference;
