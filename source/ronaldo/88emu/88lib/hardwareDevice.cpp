@@ -12,6 +12,7 @@
 #include "88lib/boards/nu10b.h"
 #include "hardwareLib/lcdfonts.h"
 #include "88lib/boards/sc55Board.h"
+#include "88lib/boards/sc55Settings.h"
 #include "88lib/boards/sc88pro.h"
 #include "88lib/boards/sc88proSettings.h"
 #include "88lib/settingsChunk.h"
@@ -32,6 +33,17 @@ namespace emu88Lib
 		constexpr uint64_t g_minimumPanelEdgeSamples = 64;
 		// Longer than any supported board's power-on intro.
 		constexpr float g_fastBootSeconds = 10.0f;
+		// Preserve the SC55 constructor's existing reset pacing policy.
+		constexpr float g_sc55ResetPauseSeconds = 0.05f;
+
+		baseLib::MD5 sc55FirmwareHash(const Sc55RomSet& roms)
+		{
+			// Both executable ROMs define the machine; fixed internal-ROM size
+			// in Sc55RomSet makes this concatenation unambiguous across models.
+			auto executable = roms.internalRom;
+			executable.insert(executable.end(), roms.programRom.begin(), roms.programRom.end());
+			return baseLib::MD5(executable);
+		}
 
 		using Screen = HardwareDevice::DisplaySnapshot::Screen;
 
@@ -192,8 +204,17 @@ namespace emu88Lib
 		{
 			auto roms = RomLoader::findSc55RomSet(m_model);
 			if(!roms.isValid()) break;
+			const auto firmware = sc55FirmwareHash(roms).getWords();
+			if(_settings && _settings->firmware != firmware) break;
+			m_assetDigests.push_back(firmware);
+			for(const auto* image : {&roms.internalRom, &roms.programRom})
+				m_assetDigests.push_back(baseLib::MD5(*image).getWords());
+			for(const auto& wave : roms.waveRom)
+				m_assetDigests.push_back(baseLib::MD5(wave).getWords());
 			m_sc55 = std::make_unique<Sc55Board>(std::move(roms), factoryReset);
 			m_sc55->setSwitchPosition(Sc55Board::SwitchMidi);
+			if(_settings && Sc55Settings::restore(*m_sc55, _settings->memory) != Sc55Settings::Result::Success)
+				m_sc55.reset();
 			break;
 		}
 		case DeviceModel::Nu10b:
@@ -226,17 +247,7 @@ namespace emu88Lib
 		if(!isValid())
 			return;
 
-		if(m_sc55)
-		{
-			// Pace host bursts before the board's finite serial arrival buffer.
-			// Retain events here so transport jumps can cancel obsolete traffic.
-			m_sc55MidiIn = std::make_unique<synthLib::MidiRateLimiter>(
-				[this](const uint8_t _byte) { m_sc55->sendMidiByte(_byte); });
-			m_sc55MidiIn->setSamplerate(static_cast<float>(m_sc55->sampleRate()));
-			m_sc55MidiIn->setDefaultRateLimit();
-			m_sc55MidiIn->setPreserveEventOrder(true);
-			m_sc55MidiIn->setResetPause(0.05f);
-		}
+		if(m_sc55) initializeSc55MidiInput();
 
 		if(_boot.initialPanelButtons)
 		{
@@ -264,6 +275,17 @@ namespace emu88Lib
 
 	HardwareDevice::~HardwareDevice() = default;
 
+	void HardwareDevice::initializeSc55MidiInput()
+	{
+		// This destination-owned callback must also be used by capture clones.
+		m_sc55MidiIn = std::make_unique<synthLib::MidiRateLimiter>(
+			[this](const uint8_t byte) { m_sc55->sendMidiByte(byte); });
+		m_sc55MidiIn->setSamplerate(static_cast<float>(m_sc55->sampleRate()));
+		m_sc55MidiIn->setDefaultRateLimit();
+		m_sc55MidiIn->setPreserveEventOrder(true);
+		m_sc55MidiIn->setResetPause(g_sc55ResetPauseSeconds);
+	}
+
 	bool HardwareDevice::supportsSettingsImage(const SettingsChunk& settings)
 	{
 		switch(settings.model)
@@ -273,6 +295,8 @@ namespace emu88Lib
 		case DeviceModel::Sc88:
 		case DeviceModel::Sc88VL:
 			return settings.layout == Sc88Settings::LayoutVersion && settings.memory.size() == Sc88::SramSize;
+		case DeviceModel::Sc55Mk1:
+			return settings.layout == Sc55Settings::LayoutVersion && settings.memory.size() == Sc55Board::SramSize;
 		default:
 			return false;
 		}
@@ -290,8 +314,23 @@ namespace emu88Lib
 	{
 	}
 
+	HardwareDevice::HardwareDevice(const synthLib::DeviceCreateParams& params, const DeviceModel model,
+	                               std::unique_ptr<Sc55Board> board, CaptureTag)
+		: synthLib::Device(params), m_model(model), m_sc55(std::move(board))
+	{
+		initializeSc55MidiInput();
+	}
+
 	std::function<std::unique_ptr<HardwareDevice>()> HardwareDevice::prepareCaptureClone() const
 	{
+		if(m_sc55 && Sc55Settings::supported(*m_sc55))
+			return [params = getDeviceCreateParams(), model = m_model,
+			        prepareBoard = m_sc55->prepareExecutionClone()]() mutable
+			{
+				auto board = prepareBoard();
+				if(!board) return std::unique_ptr<HardwareDevice>{};
+				return std::unique_ptr<HardwareDevice>(new HardwareDevice(params, model, std::move(board), CaptureTag{}));
+			};
 		if((m_model == DeviceModel::Sc88 || m_model == DeviceModel::Sc88VL) && m_sc88)
 			return [params = getDeviceCreateParams(), model = m_model,
 			        prepareBoard = m_sc88->prepareExecutionClone()]() mutable
@@ -315,7 +354,8 @@ namespace emu88Lib
 	{
 		return m_model == source.m_model &&
 		       ((m_sc88Pro && source.m_sc88Pro && m_sc88Pro->acceptsExecutionFrom(*source.m_sc88Pro)) ||
-		        (m_sc88 && source.m_sc88 && m_sc88->acceptsExecutionFrom(*source.m_sc88)));
+		        (m_sc88 && source.m_sc88 && m_sc88->acceptsExecutionFrom(*source.m_sc88)) ||
+		        (m_sc55 && source.m_sc55 && m_sc55->acceptsExecutionFrom(*source.m_sc55)));
 	}
 
 	bool HardwareDevice::copyCaptureFrom(const HardwareDevice& source)
@@ -323,6 +363,11 @@ namespace emu88Lib
 		if(!acceptsCaptureFrom(source)) return false;
 		if(m_sc88Pro && !m_sc88Pro->copyExecutionFrom(*source.m_sc88Pro)) return false;
 		if(m_sc88 && !m_sc88->copyExecutionFrom(*source.m_sc88)) return false;
+		if(m_sc55)
+		{
+			if(!m_sc55->copyExecutionFrom(*source.m_sc55) || !m_sc55MidiIn || !source.m_sc55MidiIn) return false;
+			m_sc55MidiIn->copyStateFrom(*source.m_sc55MidiIn);
+		}
 		m_assetDigests = source.m_assetDigests;
 		m_midiIn = source.m_midiIn;
 		m_sc88ProMidiOut = source.m_sc88ProMidiOut;
@@ -360,7 +405,8 @@ namespace emu88Lib
 		std::lock_guard lock(m_panelMutex);
 		return m_midiIn.empty() && m_panelCommands.empty() && m_pendingPanelCommands.empty() &&
 		       ((m_sc88Pro && Sc88ProSettings::isCaptureBoundary(*m_sc88Pro, true)) ||
-		        (m_sc88 && Sc88Settings::isCaptureBoundary(*m_sc88, true)));
+		        (m_sc88 && Sc88Settings::isCaptureBoundary(*m_sc88, true)) ||
+		        (m_sc55 && m_sc55MidiIn && m_sc55MidiIn->isInputDrained() && Sc55Settings::isCaptureBoundary(*m_sc55)));
 	}
 
 	SettingsChunk HardwareDevice::captureSettings() const
@@ -368,6 +414,14 @@ namespace emu88Lib
 		if(!isSettingsBoundary()) throw std::runtime_error("Firmware has not acknowledged all accepted input");
 		SettingsChunk result;
 		result.model = m_model;
+		if(m_sc55)
+		{
+			result.layout = Sc55Settings::LayoutVersion;
+			result.firmware = m_assetDigests.front();
+			if(Sc55Settings::capture(*m_sc55, result.memory) != Sc55Settings::Result::Success)
+				throw std::runtime_error("SC55 settings capture rejected");
+			return result;
+		}
 		if(m_sc88)
 		{
 			result.layout = Sc88Settings::LayoutVersion;
@@ -633,6 +687,8 @@ namespace emu88Lib
 		if(m_sc88Pro && !Sc88ProSettings::isCaptureBoundary(*m_sc88Pro, true)) return;
 		if(m_sc88 && (m_model == DeviceModel::Sc88 || m_model == DeviceModel::Sc88VL) &&
 		   !Sc88Settings::isPanelInputBoundary(*m_sc88)) return;
+		if(m_sc55 && Sc55Settings::supported(*m_sc55) &&
+		   !Sc55Settings::isPanelInputBoundary(*m_sc55)) return;
 		const auto command = m_panelCommands.front();
 		m_panelCommands.pop_front();
 		if(command.type == PanelCommandType::Buttons)

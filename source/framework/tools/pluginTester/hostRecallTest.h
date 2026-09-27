@@ -366,6 +366,27 @@ namespace hostRecallTest
 				description);
 	}
 
+	inline void requireAdditionalFamilySeed(const MemoryBlock& actual,
+		const MemoryBlock& seed, int model, const String& seedKind,
+		const char* description)
+	{
+		// sc55Settings_test.cpp and the native LevelR/PC producer fixture:
+		// selected A1 program at 185, level at 192 for firmware 1.21.
+		if(model == 5 && seedKind == "producer-sc55mk1")
+		{
+			constexpr size_t programAddress = 185;
+			constexpr size_t levelAddress = 192;
+			require(sc88HardwareByte(seed, programAddress) == 17 &&
+				sc88HardwareByte(seed, levelAddress) == 102,
+				"Native SC-55mk1 seed has selected program 17 and LevelR volume 102");
+			for(const auto address : {programAddress, levelAddress})
+				require(sc88HardwareByte(actual, address) == sc88HardwareByte(seed, address),
+					description);
+			return;
+		}
+		throw std::runtime_error("Additional-family VST3 seed has no verified model-specific oracle");
+	}
+
 	inline void requireHostOwnedRouting(const MemoryBlock& componentState)
 	{
 		auto envelope = parseXML(String::fromUTF8(static_cast<const char*>(componentState.getData()),
@@ -486,6 +507,14 @@ namespace hostRecallTest
 				requireProPanelContext(componentStateFromHost(save(*restored)), nativeComponent,
 					"Fresh process retains the native Pro Fine Tune menu context");
 		}
+		if(nativeComponentPath.isNotEmpty() && expectedModel == 5)
+		{
+			MemoryBlock nativeComponent;
+			require(File(nativeComponentPath).loadFileAsData(nativeComponent),
+				"Fresh process reads the native SC-55mk1 source image");
+			requireAdditionalFamilySeed(componentStateFromHost(save(*restored)), nativeComponent,
+				expectedModel, seedKind, "Fresh process retains native SC-55mk1 sound edits");
+		}
 		const auto audio = render(*restored, auditionNotes(), auditionBlocks);
 		require(MemoryBlock(audio.data(), audio.size() * sizeof(float)) == expectedAudio,
 			"Fresh process produces identical recalled audio");
@@ -551,6 +580,9 @@ namespace hostRecallTest
 					requireProPanelContext(componentStateFromHost(saved), nativeComponent,
 						"Native Pro Fine Tune menu survives a fresh VST3 capture");
 			}
+			if(expectedModel == 5)
+				requireAdditionalFamilySeed(componentStateFromHost(saved), nativeComponent,
+					expectedModel, seedKind, "Native SC-55mk1 sound edits survive VST3 capture");
 		}
 		else
 		{
@@ -664,6 +696,9 @@ namespace hostRecallTest
 				requireProPanelContext(componentStateFromHost(save(*restored)), nativeComponent,
 					"Fresh VST3 instance restores the native Pro Fine Tune menu context");
 		}
+		if(nativeComponentPath.isNotEmpty() && expectedModel == 5)
+			requireAdditionalFamilySeed(componentStateFromHost(save(*restored)), nativeComponent,
+				expectedModel, seedKind, "Fresh VST3 instance restores native SC-55mk1 sound edits");
 		auto duplicate = create(manager, description);
 		duplicate->setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
 		require(save(*duplicate) == saved, "A second fresh instance restores the same state");

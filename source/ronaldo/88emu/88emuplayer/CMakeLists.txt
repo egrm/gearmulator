@@ -199,6 +199,14 @@ if(BUILD_TESTING)
 		ENVIRONMENT "TUS_DATA_FOLDER=${CMAKE_CURRENT_BINARY_DIR}/producer-recall-test-data"
 		SKIP_RETURN_CODE 77)
 	set_property(TARGET 88emuProducerRecall_test PROPERTY FOLDER "Ronaldo/tests")
+	add_executable(88emuAdditionalFamilyRecall_test tests/Emu88AdditionalFamilyRecall_test.cpp)
+	target_link_libraries(88emuAdditionalFamilyRecall_test PRIVATE 88emuplayer 88emuplayer_BinaryData 88lib
+		jucePlayerLib juceRmlUi juceUiLib jucePluginData juce_plugin_modules)
+	add_test(NAME 88emuAdditionalFamilyRecall COMMAND 88emuAdditionalFamilyRecall_test --sc55-mk1)
+	set_tests_properties(88emuAdditionalFamilyRecall PROPERTIES
+		ENVIRONMENT "TUS_DATA_FOLDER=${CMAKE_CURRENT_BINARY_DIR}/additional-family-recall-test-data"
+		SKIP_RETURN_CODE 77)
+	set_property(TARGET 88emuAdditionalFamilyRecall_test PROPERTY FOLDER "Ronaldo/tests")
 	add_executable(88emuProSystemRecall_test tests/Emu88ProSystemRecall_test.cpp)
 	target_link_libraries(88emuProSystemRecall_test PRIVATE 88emuplayer 88emuplayer_BinaryData 88lib
 		jucePlayerLib juceRmlUi juceUiLib jucePluginData juce_plugin_modules)

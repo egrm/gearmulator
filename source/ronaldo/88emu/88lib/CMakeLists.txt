@@ -22,6 +22,7 @@ set(SOURCES
 	rom/romInventory.cpp rom/romScanner.cpp
 	rom/romRegistry.h
 	boards/sc55Board.cpp boards/sc55Board.h
+	boards/sc55Settings.cpp boards/sc55Settings.h
 	mcu/sc55_submcu.cpp mcu/sc55_submcu.h
 	boards/sc88.cpp boards/sc88.h
 	boards/sc88Settings.cpp boards/sc88Settings.h

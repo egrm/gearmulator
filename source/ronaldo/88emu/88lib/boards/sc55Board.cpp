@@ -61,6 +61,8 @@ namespace emu88Lib
 	Sc55Board::Sc55Board(Sc55RomSet _roms, const bool _factoryReset, const bool _wavesAlreadyDecoded)
 		: m_roms(std::move(_roms))
 		, m_profile(m_roms.profile())
+		, m_internalRomHash(m_roms.internalRom)
+		, m_programRomHash(m_roms.programRom)
 		, m_gp(gpLib::GpConfig{m_profile.generation == Sc55Generation::First ? Mk1GpClockHz : Mk2GpClockHz,
 		                       m_profile.generation == Sc55Generation::First})
 	{

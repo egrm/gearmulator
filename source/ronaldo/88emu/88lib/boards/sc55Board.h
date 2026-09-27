@@ -14,6 +14,7 @@
 #include "custom_chips/gp/gp.h"
 #include "cpu/h8500/machine.hpp"
 #include "hardwareLib/hd44780.h"
+#include "baseLib/md5.h"
 
 namespace emu88Lib
 {
@@ -41,6 +42,7 @@ namespace emu88Lib
 	//
 	class Sc55Board final
 	{
+		friend class Sc55Settings;
 	public:
 
 		// External interrupt pins as this board wires them: the GP's voice-end
@@ -254,6 +256,8 @@ namespace emu88Lib
 
 		Sc55RomSet   m_roms;
 		Sc55DeviceProfile m_profile;
+		baseLib::MD5 m_internalRomHash;
+		baseLib::MD5 m_programRomHash;
 		bool     m_valid = false;
 		bool     m_captureShell = false;
 
