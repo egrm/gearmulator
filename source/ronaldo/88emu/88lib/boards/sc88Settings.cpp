@@ -68,6 +68,20 @@ namespace emu88Lib
 		constexpr uint8_t g_normalPage = 0;
 		constexpr size_t g_sc88RequestedPage = 0x54d3;
 		constexpr size_t g_sc88vlRequestedPage = 0x54db;
+		// Native ALL, SELECT EQ fixture (Emu88Recall_test --family-eq): the
+		// display worker remains on page 0 but advances both ALL-scope bytes.
+		// SC 01:A767/A76E and VL 01:9AB7/9ABE inspect the first byte.
+		constexpr size_t g_sc88MenuMode = 0x54d0, g_sc88MenuRequest = 0x54d1;
+		constexpr size_t g_sc88vlMenuMode = 0x54d8, g_sc88vlMenuRequest = 0x54d9;
+		constexpr uint8_t g_sc88NormalMode = 0, g_sc88AllMode = 1;
+		constexpr uint8_t g_sc88vlNormalMode = 1, g_sc88vlAllMode = 2;
+		// Page-0 SELECT dispatch SC 01:CEEA..CEF3 and VL 01:C687..C690
+		// increments this four-position ALL selector modulo four. The native
+		// processor fixture observes EQ Gain at selector zero.
+		constexpr size_t g_sc88AllSelector = 0x54d6, g_sc88vlAllSelector = 0x54de;
+		constexpr uint8_t g_eqGainSelector = 0;
+		constexpr unsigned g_allSelectorPositions = 4;
+		constexpr std::string_view g_eqGainTitle = "ALLEQ Gain";
 		// The source-verified dispatcher idle loops are SC 00:06B7/06BB/06BE
 		// and VL 00:0733/0737/073A (family idle disassemblies).
 		constexpr std::array<uint32_t,3> g_sc88IdlePc{0x06b7,0x06bb,0x06be};
@@ -225,6 +239,23 @@ namespace emu88Lib
 		if(workFree != capacity) return false;
 		if(page != g_normalPage && page != g_userInstrumentPage) return false;
 		if(page != ram[sc ? g_sc88RequestedPage : g_sc88vlRequestedPage]) return false;
+		if(page == g_normalPage)
+		{
+			const auto mode = ram[sc ? g_sc88MenuMode : g_sc88vlMenuMode];
+			const auto requestedMode = ram[sc ? g_sc88MenuRequest : g_sc88vlMenuRequest];
+			if(mode != requestedMode ||
+			   (mode != (sc ? g_sc88NormalMode : g_sc88vlNormalMode) &&
+			    mode != (sc ? g_sc88AllMode : g_sc88vlAllMode))) return false;
+			if(mode == (sc ? g_sc88AllMode : g_sc88vlAllMode))
+			{
+				if(ram[sc ? g_sc88AllSelector : g_sc88vlAllSelector] != g_eqGainSelector)
+					return false;
+				const auto& lcd = board.m_lcd;
+				std::string visible(lcd.getVisibleColumns()*lcd.getVisibleLines(),' ');
+				lcd.copyVisibleDdRam(visible.data());
+				if(visible.substr(0,g_eqGainTitle.size()) != g_eqGainTitle) return false;
+			}
+		}
 		for(size_t key{};key<std::numeric_limits<decltype(board.m_buttons)>::digits;++key)
 			if(ram[g_deferredKeys+key] & g_deferredMask) return false;
 		if(page == g_userInstrumentPage)
@@ -264,6 +295,11 @@ namespace emu88Lib
 		const auto panelPage = board.m_model == Model::Sc88 ? g_sc88PanelPage : g_sc88vlPanelPage;
 		const auto requestedPage = board.m_model == Model::Sc88 ? g_sc88RequestedPage : g_sc88vlRequestedPage;
 		const auto userGroup = board.m_model == Model::Sc88 ? g_sc88UserGroup : g_sc88vlUserGroup;
+		const auto menuMode = board.m_model == Model::Sc88 ? g_sc88MenuMode : g_sc88vlMenuMode;
+		const auto menuRequest = board.m_model == Model::Sc88 ? g_sc88MenuRequest : g_sc88vlMenuRequest;
+		const auto normalMode = board.m_model == Model::Sc88 ? g_sc88NormalMode : g_sc88vlNormalMode;
+		const auto allMode = board.m_model == Model::Sc88 ? g_sc88AllMode : g_sc88vlAllMode;
+		const auto allSelector = board.m_model == Model::Sc88 ? g_sc88AllSelector : g_sc88vlAllSelector;
 		const auto savedSelection = readWord(image,selectedIndex);
 		if(savedSelection >= g_parts) return Result::InvalidImage;
 		// Only normal and UserInst pages have source-backed fresh-board panel
@@ -272,6 +308,11 @@ namespace emu88Lib
 		   image[requestedPage] != image[panelPage]) return Result::InvalidImage;
 		if(image[panelPage]==g_userInstrumentPage &&
 		   (image[userGroup]<g_firstUserGroup || image[userGroup]>g_lastUserGroup))
+			return Result::InvalidImage;
+		if(image[panelPage]==g_normalPage &&
+		   (image[menuMode]!=image[menuRequest] ||
+		    (image[menuMode]!=normalMode && image[menuMode]!=allMode) ||
+		    (image[menuMode]==allMode && image[allSelector]!=g_eqGainSelector)))
 			return Result::InvalidImage;
 		std::array<uint8_t,g_meterCount> freshMeters{};
 		std::array<uint8_t,g_accumulatorBytes> freshAccumulator{};
@@ -312,6 +353,23 @@ namespace emu88Lib
 			for(unsigned move{};move<g_lastUserGroup && board.m_sram[userGroup]!=image[userGroup];++move)
 				pressPanel(board,buttonBit(Button::Select));
 			if(board.m_sram[userGroup]!=image[userGroup]) return Result::InvalidImage;
+		}
+		if(image[panelPage]==g_normalPage && image[menuMode]==allMode)
+		{
+			// The ALL selector can start at any of its four ROM positions.
+			// Enter through the native panel, then cycle to the saved EQ Gain
+			// position so firmware rebuilds the descriptor and LCD.
+			pressPanel(board,buttonBit(Button::InstAll));
+			for(unsigned move{};move<g_allSelectorPositions;++move)
+			{
+				pressPanel(board,buttonBit(Button::Select));
+				if(board.m_sram[allSelector]==g_eqGainSelector &&
+				   board.m_sram[menuMode]==allMode &&
+				   board.m_sram[menuRequest]==allMode) break;
+			}
+			if(board.m_sram[allSelector]!=g_eqGainSelector ||
+			   board.m_sram[menuMode]!=allMode || board.m_sram[menuRequest]!=allMode ||
+			   board.m_sram[panelPage]!=g_normalPage) return Result::InvalidImage;
 		}
 		std::copy_n(image.begin()+g_polyPressureBase,g_parts*g_polyPressureKeys,
 		            board.m_sram.begin()+g_polyPressureBase);

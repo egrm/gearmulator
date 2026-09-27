@@ -174,6 +174,187 @@ namespace
         }
     }
 
+    void familyEqMenuRecall()
+    {
+        // Roland SC-88 owner's manual, Ch. 3 Equalizer setting procedure:
+        // ALL then USER INST EDIT SELECT opens the global Gain/Frequency menu.
+        // The exact SC-88/VL page and cursor are intentionally learned from
+        // the native processor fixture before fresh-board restoration expands.
+        const auto eqValues=[](const std::string& text)
+        {
+            // Compare the displayed signed EQ numbers, excluding the cursor
+            // and animated panel glyphs around them.
+            std::string values;
+            for(const char character : text.substr(std::string("ALLEQ Gain").size(),10))
+                if((character>='0' && character<='9') || character=='+' || character=='-')
+                    values.push_back(character);
+            return values;
+        };
+        for(const auto model : {emu88Lib::DeviceModel::Sc88, emu88Lib::DeviceModel::Sc88VL})
+        {
+            emu88Player::Processor source;
+            CHECK(source.setDeviceModel(model));
+            source.setRateAndBufferSizeDetails(44100,128);
+            source.prepareToPlay(44100,128);
+            // Roland's SC-88 EQ procedure first enables EQ for the part.
+            // The global gain controls may remain inert while it is off.
+            source.clickPanelButton(emu88Lib::buttonBit(emu88Lib::Button::Eq),0);
+            render(source,44100/2);
+            const auto normal=hardware(save(source)).memory;
+            source.clickPanelButton(emu88Lib::buttonBit(emu88Lib::Button::InstAll),0);
+            render(source,44100/2);
+            const auto beforeSelect=source.hardwareDisplaySnapshot();
+            CHECK(beforeSelect.has_value());
+            if(beforeSelect && !beforeSelect->screens[0].text.empty())
+                std::cout << "ALL before SELECT model=" << static_cast<int>(model)
+                          << " caption=" << beforeSelect->screens[0].text.front()
+                          << " captureBoundary=" << source.hardware()->isSettingsBoundary() << '\n';
+            source.clickPanelButton(emu88Lib::buttonBit(emu88Lib::Button::Select),0);
+            // Unlike Save's private execution clone, live panel publication
+            // advances only when this processor renders. The owner manual's
+            // "ALL EQ Gain" caption is the native entry oracle.
+            bool eqVisible=false;
+            for(int frames{};frames<44100*2 && !eqVisible;frames+=128)
+            {
+                render(source,128);
+                const auto display=source.hardwareDisplaySnapshot();
+                if(display && !display->screens[0].text.empty())
+                {
+                    const auto& line=display->screens[0].text.front();
+                    eqVisible=line.rfind("ALLEQ Gain",0)==0 && eqValues(line)=="00";
+                }
+            }
+            CHECK(eqVisible);
+            if(!eqVisible) continue;
+            const auto opened=save(source);
+            CHECK(hardware(opened).model==model);
+            const auto contextBase=model==emu88Lib::DeviceModel::Sc88?size_t{0x54d0}:size_t{0x54d8};
+            const auto printContext=[&](const char* phase,const std::vector<uint8_t>& memory)
+            {
+                std::cout << "EQ context model=" << static_cast<int>(model)
+                          << " phase=" << phase << " 54dX=";
+                for(size_t offset{};offset<8;++offset)
+                    std::cout << unsigned(memory.at(contextBase+offset)) << ',';
+                std::cout << '\n';
+            };
+            printContext("normal",normal);
+            printContext("opened",hardware(opened).memory);
+            const auto sourceDisplay=source.hardwareDisplaySnapshot();
+            CHECK(sourceDisplay.has_value());
+            emu88Player::Processor restored;
+            load(restored,opened);
+            restored.setRateAndBufferSizeDetails(44100,128);
+            restored.prepareToPlay(44100,128);
+            render(restored,128);
+            printContext("restored",hardware(save(restored)).memory);
+            const auto restoredDisplay=restored.hardwareDisplaySnapshot();
+            CHECK(restoredDisplay.has_value());
+            if(sourceDisplay && restoredDisplay)
+            {
+                const auto& nativeText=sourceDisplay->screens[0].text;
+                const auto& reopenedText=restoredDisplay->screens[0].text;
+                std::cout << "EQ display model=" << static_cast<int>(model)
+                          << " native=" << (nativeText.empty()?std::string{}:nativeText.front())
+                          << " restored=" << (reopenedText.empty()?std::string{}:reopenedText.front()) << '\n';
+                // Character columns beyond 20 include animated meter glyphs.
+                CHECK(!nativeText.empty() && !reopenedText.empty());
+                if(!nativeText.empty() && !reopenedText.empty())
+                    CHECK(nativeText.front().substr(0,20)==reopenedText.front().substr(0,20));
+            }
+            // Compare the real-ROM low-gain edit with the fresh restoration.
+            const auto nativeBefore=hardware(save(source)).memory;
+            const auto reopenedBefore=hardware(save(restored)).memory;
+            // SC ALL-mode table 07:A4BA routes physical key29 through its
+            // descriptor writer. The real-ROM candidate fixture showed it
+            // changes the displayed low gain 0→+1 on both SC and VL.
+            const auto edit=emu88Lib::buttonBit(emu88Lib::Button::VibDepthR);
+            const auto pressEdit=[edit](emu88Player::Processor& processor)
+            {
+                // Use the native held/released scanner path, as the Pro
+                // processor panel fixture does, and wait for LCD publication.
+                processor.setPanelButtons(edit);
+                render(processor,4410);
+                processor.setPanelButtons(0);
+                render(processor,11025);
+            };
+            pressEdit(source);
+            pressEdit(restored);
+            const auto nativeAfter=hardware(save(source)).memory;
+            const auto reopenedAfter=hardware(save(restored)).memory;
+            const auto nativeEditedDisplay=source.hardwareDisplaySnapshot();
+            const auto reopenedEditedDisplay=restored.hardwareDisplaySnapshot();
+            CHECK(nativeEditedDisplay.has_value() && reopenedEditedDisplay.has_value());
+            if(nativeEditedDisplay && reopenedEditedDisplay)
+            {
+                std::cout << "EQ first edit model=" << static_cast<int>(model)
+                          << " before=" << sourceDisplay->screens[0].text.front()
+                          << " native=" << nativeEditedDisplay->screens[0].text.front()
+                          << " restored=" << reopenedEditedDisplay->screens[0].text.front() << '\n';
+                CHECK(eqValues(nativeEditedDisplay->screens[0].text.front())==
+                      eqValues(reopenedEditedDisplay->screens[0].text.front()));
+                CHECK(eqValues(nativeEditedDisplay->screens[0].text.front())!=
+                      eqValues(sourceDisplay->screens[0].text.front()));
+            }
+            size_t nativeChanges{}, mismatchedEdits{};
+            const auto compareSpan=[&](size_t first,size_t last)
+            {
+                for(size_t address=first;address<last;++address)
+                {
+                    const bool nativeChanged=nativeBefore[address]!=nativeAfter[address];
+                    const bool reopenedChanged=reopenedBefore[address]!=reopenedAfter[address];
+                    nativeChanges+=nativeChanged;
+                    mismatchedEdits+=nativeChanged!=reopenedChanged ||
+                                     (nativeChanged && nativeAfter[address]!=reopenedAfter[address]);
+                }
+            };
+            // Explicit System/effect spans preserved by both ROM boot gates,
+            // source-verified in 88emu-sc88-vl-clone-seam.md.
+            compareSpan(0x8040,0x8088);
+            compareSpan(0x8788,0x87c8);
+            compareSpan(0x9540,0x9588);
+            compareSpan(0x9c88,0x9cc8);
+            std::cout << "EQ preserved-effect changes=" << nativeChanges << '\n';
+            CHECK(nativeChanges>0);
+            CHECK_EQ(mismatchedEdits,0);
+            // Save a nondefault gain, then start another processor. This
+            // distinguishes retaining the EQ value from merely reopening
+            // the same native menu after a default-value capture.
+            const auto edited=save(source);
+            emu88Player::Processor editedRestored;
+            load(editedRestored,edited);
+            editedRestored.setRateAndBufferSizeDetails(44100,128);
+            editedRestored.prepareToPlay(44100,128);
+            render(editedRestored,128);
+            (void)hardware(save(editedRestored));
+            const auto retainedDisplay=editedRestored.hardwareDisplaySnapshot();
+            CHECK(retainedDisplay.has_value());
+            if(nativeEditedDisplay && retainedDisplay)
+                CHECK(eqValues(nativeEditedDisplay->screens[0].text.front())==
+                      eqValues(retainedDisplay->screens[0].text.front()));
+            pressEdit(source);
+            pressEdit(editedRestored);
+            (void)hardware(save(source));
+            (void)hardware(save(editedRestored));
+            const auto secondNativeDisplay=source.hardwareDisplaySnapshot();
+            const auto secondRestoredDisplay=editedRestored.hardwareDisplaySnapshot();
+            CHECK(secondNativeDisplay.has_value() && secondRestoredDisplay.has_value());
+            if(secondNativeDisplay && secondRestoredDisplay)
+            {
+                std::cout << "EQ second edit model=" << static_cast<int>(model)
+                          << " native=" << secondNativeDisplay->screens[0].text.front()
+                          << " restored=" << secondRestoredDisplay->screens[0].text.front() << '\n';
+                CHECK(eqValues(secondNativeDisplay->screens[0].text.front())==
+                      eqValues(secondRestoredDisplay->screens[0].text.front()));
+                CHECK(eqValues(secondNativeDisplay->screens[0].text.front())!=
+                      eqValues(nativeEditedDisplay->screens[0].text.front()));
+            }
+            const auto fixture=juce::File(emu88Player::defaultDataFolder()).getChildFile(
+                "eq-model-"+juce::String(static_cast<int>(model))+".component");
+            CHECK(fixture.replaceWithData(edited.getData(),edited.getSize()));
+            std::cout << "family EQ menu recall model=" << static_cast<int>(model) << '\n';
+        }
+    }
+
     void proPanelRecall()
     {
         // tools/sc88pro_state_probe.cpp::testPanelMenuRecall establishes this
@@ -244,6 +425,12 @@ int main(int argc, char** argv)
             familyPanelRecall();
             emu88Player::standaloneLaunch = nullptr;
             return test::finish("88emuFamilyPanelRecall");
+        }
+        if(argc > 1 && std::string(argv[1]) == "--family-eq")
+        {
+            familyEqMenuRecall();
+            emu88Player::standaloneLaunch = nullptr;
+            return test::finish("88emuFamilyEqMenuRecall");
         }
         if(argc > 1 && std::string(argv[1]) == "--pro-panel")
         {

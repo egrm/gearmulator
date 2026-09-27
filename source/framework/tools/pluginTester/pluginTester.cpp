@@ -37,7 +37,7 @@ int main(const int _argc, char* _argv[])
 	{
 		Logger::writeToLog("Error: " + _msg);
 		Logger::writeToLog("Usage:\n"
-			"pluginTester -plugin <pathToPlugin> [-recall [-recall-model n] [-recall-component path] | -seconds n -blocks n -blocksize n -samplerate x -forever -repeat n]");
+			"pluginTester -plugin <pathToPlugin> [-recall [-recall-model n] [-recall-component path] [-recall-seed eq] | -seconds n -blocks n -blocksize n -samplerate x -forever -repeat n]");
 		return 1;
 	};
 
@@ -118,6 +118,12 @@ int main(const int _argc, char* _argv[])
 			return error("Failed to find plugin " + pluginPathName);
 
 		const auto recallModel = cmdLine.getInt("recall-model", -1);
+		const auto recallSeed = cmdLine.get("recall-seed");
+		if(!recallSeed.empty() &&
+			(recallSeed != "eq" || !cmdLine.contains("recall-component") ||
+				(recallModel != 0 && recallModel != 1)))
+			return error("EQ recall seed requires an SC-88/VL native component path");
+		const bool eqSeed = recallSeed == "eq";
 		if (cmdLine.contains("recall-power-off") && cmdLine.contains("recall-read"))
 			return hostRecallTest::readFreshPowerOff(desc, cmdLine.get("recall-read"), recallModel);
 		if (cmdLine.contains("recall-power-off"))
@@ -125,10 +131,10 @@ int main(const int _argc, char* _argv[])
 				cmdLine.get("recall-write"), recallModel);
 		if (cmdLine.contains("recall-read"))
 			return hostRecallTest::readFreshProcess(desc, cmdLine.get("recall-read"), recallModel,
-				cmdLine.get("recall-component"));
+				cmdLine.get("recall-component"), eqSeed);
 		if (cmdLine.contains("recall"))
 			return hostRecallTest::run(desc, cmdLine.get("recall-write"), recallModel,
-				cmdLine.get("recall-component"));
+				cmdLine.get("recall-component"), eqSeed);
 
 	    if (!pluginHost.loadPlugin(desc))
 			return error("Failed to load plugin " + pluginPathName);
