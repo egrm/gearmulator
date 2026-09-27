@@ -42,6 +42,10 @@ namespace synthLib
 		void transportDiscontinuity(uint32_t _generation);
 
 		void processSample();
+		// Copy the wire scheduler into another device while keeping that device's
+		// byte sink bound to its own MCU.
+		void copyStateFrom(const MidiRateLimiter& _source);
+		bool isInputDrained() const;
 
 		// if you want to insert a pause between sysex messages, e.g. to give the synth time to process the data
 		void setSysexPause(float _seconds);

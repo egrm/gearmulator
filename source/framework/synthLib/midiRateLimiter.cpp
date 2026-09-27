@@ -11,6 +11,41 @@ namespace synthLib
 	{
 	}
 
+	void MidiRateLimiter::copyStateFrom(const MidiRateLimiter& _source)
+	{
+		if(this == &_source)
+			return;
+		m_samplerate = _source.m_samplerate;
+		m_samplerateInv = _source.m_samplerateInv;
+		m_bytesPerSecond = _source.m_bytesPerSecond;
+		m_remainingBytes = _source.m_remainingBytes;
+		m_pendingBytes = _source.m_pendingBytes;
+		m_pendingSysex = _source.m_pendingSysex;
+		m_pendingRealtime = _source.m_pendingRealtime;
+		m_currentEvent = _source.m_currentEvent;
+		m_sendingSysex = _source.m_sendingSysex;
+		m_preserveEventOrder = _source.m_preserveEventOrder;
+		m_sysexPause = _source.m_sysexPause;
+		m_resetPause = _source.m_resetPause;
+		m_remainingResetPause = _source.m_remainingResetPause;
+		m_remainingSysexPause = _source.m_remainingSysexPause;
+		m_sysexPauseLengthThreshold = _source.m_sysexPauseLengthThreshold;
+		m_currentSysexLength = _source.m_currentSysexLength;
+		m_currentBytesSent = _source.m_currentBytesSent;
+		m_runningStatus = _source.m_runningStatus;
+		m_activeChannels = _source.m_activeChannels;
+		m_heldChannels = _source.m_heldChannels;
+		m_transportGeneration = _source.m_transportGeneration;
+		m_currentObsolete = _source.m_currentObsolete;
+		m_silence = _source.m_silence;
+	}
+
+	bool MidiRateLimiter::isInputDrained() const
+	{
+		return m_pendingBytes.empty() && m_pendingSysex.empty() &&
+			m_pendingRealtime.empty() && !m_currentEvent.has_value();
+	}
+
 	void MidiRateLimiter::setSamplerate(const float _samplerate)
 	{
 		m_samplerate = _samplerate;

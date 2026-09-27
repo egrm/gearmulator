@@ -226,6 +226,39 @@ namespace
 		if(resetEnd < 0 || noteStart - resetEnd < 50) std::abort();
 	}
 
+	void testCopyStateKeepsDestinationCallbackAndQueuedInput()
+	{
+		std::vector<uint8_t> sourceBytes, destinationBytes;
+		MidiRateLimiter source([&](uint8_t b) { sourceBytes.push_back(b); });
+		MidiRateLimiter destination([&](uint8_t b) { destinationBytes.push_back(b); });
+		source.setSamplerate(1000);
+		source.setRateLimit(1000);
+		source.write(midi(0, M_NOTEON, 60, 100));
+		source.write(sysex({0xf0, 1, 2, 0xf7}));
+		source.processSample(); // leave a channel message partly on the wire
+		if(source.isInputDrained()) std::abort();
+		destination.copyStateFrom(source);
+		if(destination.isInputDrained()) std::abort();
+		for(int i = 0; i < 8; ++i)
+		{
+			source.processSample();
+			destination.processSample();
+		}
+		expect(sourceBytes, {M_NOTEON, 60, 100, 0xf0, 1, 2, 0xf7});
+		expect(destinationBytes, {60, 100, 0xf0, 1, 2, 0xf7});
+		if(!source.isInputDrained() || !destination.isInputDrained()) std::abort();
+		// The copied scheduler's callback must never point back into the source.
+		destination.write(midi(0, M_CONTROLCHANGE, MC_EXPRESSION, 7));
+		destination.processSample();
+		if(destination.isInputDrained()) std::abort();
+		destination.processSample();
+		destination.processSample();
+		expect(destinationBytes, {60, 100, 0xf0, 1, 2, 0xf7,
+			M_CONTROLCHANGE, MC_EXPRESSION, 7});
+		expect(sourceBytes, {M_NOTEON, 60, 100, 0xf0, 1, 2, 0xf7});
+		if(!destination.isInputDrained()) std::abort();
+	}
+
 } // namespace
 
 int main()
@@ -240,5 +273,6 @@ int main()
 	testSecondDiscontinuityStillSilences();
 	testRealtimeOvertakesSysex();
 	testSysexPauseExpiresWhileIdle();
+	testCopyStateKeepsDestinationCallbackAndQueuedInput();
 	return 0;
 }
