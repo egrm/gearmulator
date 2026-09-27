@@ -771,120 +771,145 @@ bool exercise(Model model, bool isolateHistory)
         // D760/D761 and mark C5E0/C620 for recomputation. Read the native
         // assignments and use the bank fixture's verified channel mapping.
         constexpr size_t assignableOne=0xd760, assignableTwo=0xd761;
-        auto assignSource=bankSource->cloneExecution();
-        if(!assignSource) throw std::runtime_error("assignable source clone failed");
-        const auto assignBefore=Sc88ExecutionProbe::ram(*assignSource);
-        std::array<uint8_t,g_partCount> assignedOne{},assignedTwo{},assignedSlot{};
-        size_t closedAssignGates{},invalidAssignments{},invalidSlots{};
-        for(size_t part{};part<g_partCount;++part)
+        for(const bool reassignControllers:{false,true})
         {
-            const auto record=readWord(assignBefore,partPointers+2*part);
-            closedAssignGates+=(readWord(assignBefore,record+2)&(uint16_t{1}<<11))==0;
-            assignedOne[part]=assignBefore.at(record+0x26);
-            assignedTwo[part]=assignBefore.at(record+0x27);
-            invalidAssignments+=assignedOne[part]>=0x78 || assignedTwo[part]>=0x78 ||
-                                assignedOne[part]==assignedTwo[part];
-            const auto slot=assignBefore.at(bankMsbBase+2*part);
-            invalidSlots+=slot<1 || slot>g_partCount;
-            assignedSlot[part]=static_cast<uint8_t>(slot-1);
-            std::cout << "native-assignable part=" << part << " channel-slot=" << unsigned(slot)
-                      << " gate=" << unsigned((readWord(assignBefore,record+2)>>11)&1)
-                      << " CC1=" << unsigned(assignedOne[part])
-                      << " CC2=" << unsigned(assignedTwo[part]) << '\n';
-        }
-        std::cout << "native-assignable closed-gates=" << closedAssignGates
-                  << " invalid-assignments=" << invalidAssignments
-                  << " invalid-slots=" << invalidSlots << '\n';
-        const bool nativeAssignmentsUsable=closedAssignGates==0 &&
-                                           invalidAssignments==0 && invalidSlots==0;
-        check(nativeAssignmentsUsable,"native assignable CC defaults are usable");
-        if(nativeAssignmentsUsable)
-        {
-            std::array<uint8_t,g_partCount> firstOne{},firstTwo{};
-            for(size_t part{};part<g_partCount;++part)
+            auto assignSource=bankSource->cloneExecution();
+            if(!assignSource) throw std::runtime_error("assignable source clone failed");
+            // GS addresses from the SC-88Pro manual; the native SC/VL fixture
+            // independently requires all primary assignment fields to change.
+            if(reassignControllers)
             {
-                const auto slot=assignedSlot[part];
-                const auto port=static_cast<uint8_t>(slot/g_groupSize);
-                const auto status=static_cast<uint8_t>(0xb0 | (slot%g_groupSize));
-                firstOne[part]=static_cast<uint8_t>(20+part);
-                firstTwo[part]=static_cast<uint8_t>(70+part);
-                send(*assignSource,port,status,assignedOne[part],firstOne[part]);
-                send(*assignSource,port,status,assignedTwo[part],firstTwo[part]);
-            }
-            run(*assignSource,g_drainSamples);
-            std::vector<uint8_t> assignImage;
-            check(Sc88Settings::capture(*assignSource,assignImage)==Result::Success,
-                  "capture native assignable controllers");
-            if(assignImage.size()!=Sc88::SramSize)
-                throw std::runtime_error("native assignable image has invalid size");
-            size_t nativeAssignMismatches{},unchangedAssignValues{};
-            for(size_t part{};part<g_partCount;++part)
-            {
-                nativeAssignMismatches+=(assignImage[assignableOne+2*part]!=firstOne[part])+
-                                        (assignImage[assignableTwo+2*part]!=firstTwo[part]);
-                unchangedAssignValues+=(assignImage[assignableOne+2*part]==
-                                        assignBefore[assignableOne+2*part])+
-                                       (assignImage[assignableTwo+2*part]==
-                                        assignBefore[assignableTwo+2*part]);
-            }
-            std::cout << "native-assignable value-mismatches=" << nativeAssignMismatches
-                      << " unchanged-values=" << unchangedAssignValues << '\n';
-            check(nativeAssignMismatches==0 && unchangedAssignValues==0,
-                  "both native assignable CC values accepted on all 32 parts");
-            for(uint8_t preference:{uint8_t{0},uint8_t{1}})
-            {
-                currentPreference=preference;
-                auto variant=assignImage;
-                variant[g_preference]=preference; // Diagnostic saved preference variant.
-                auto restoredAssign=std::make_unique<Sc88>(rom,waves,model,false);
-                const auto assignRestoreResult=Sc88Settings::restore(*restoredAssign,variant);
-                check(assignRestoreResult==Result::Success,
-                      "restore native assignable controllers");
-                if(assignRestoreResult!=Result::Success) continue;
-                size_t lostAssignValues{};
                 for(size_t part{};part<g_partCount;++part)
-                    lostAssignValues+=(Sc88ExecutionProbe::ram(*restoredAssign)[assignableOne+2*part]!=
-                                       assignImage[assignableOne+2*part])+
-                                      (Sc88ExecutionProbe::ram(*restoredAssign)[assignableTwo+2*part]!=
-                                       assignImage[assignableTwo+2*part]);
-                check(lostAssignValues==0,"fresh restore retains both assignable values");
-                auto continuedAssign=assignSource->cloneExecution();
-                if(!continuedAssign) throw std::runtime_error("assignable continuation clone failed");
+                {
+                    synthLib::SMidiEvent assignment(synthLib::MidiEventSource::Host);
+                    assignment.sysex={0xf0,0x41,0x10,0x42,0x12,
+                        static_cast<uint8_t>(0x40+(part/g_groupSize)*0x10),
+                        static_cast<uint8_t>(0x10+part%g_groupSize),0x1f,18,19};
+                    unsigned sum{};
+                    for(size_t i=5;i<assignment.sysex.size();++i) sum+=assignment.sysex[i];
+                    assignment.sysex.push_back(static_cast<uint8_t>((128-(sum&127))&127));
+                    assignment.sysex.push_back(0xf7);
+                    assignSource->addMidiEvent(assignment);
+                }
+                run(*assignSource,g_drainSamples);
+            }
+            const auto assignBefore=Sc88ExecutionProbe::ram(*assignSource);
+            std::array<uint8_t,g_partCount> assignedOne{},assignedTwo{},assignedSlot{};
+            size_t closedAssignGates{},invalidAssignments{},invalidSlots{};
+            for(size_t part{};part<g_partCount;++part)
+            {
+                const auto record=readWord(assignBefore,partPointers+2*part);
+                closedAssignGates+=(readWord(assignBefore,record+2)&(uint16_t{1}<<11))==0;
+                assignedOne[part]=assignBefore.at(record+0x26);
+                assignedTwo[part]=assignBefore.at(record+0x27);
+                check(assignedOne[part]==(reassignControllers?18:16) &&
+                      assignedTwo[part]==(reassignControllers?19:17),
+                      "native default or reassigned controllers match every part");
+                invalidAssignments+=assignedOne[part]>=0x78 || assignedTwo[part]>=0x78 ||
+                                    assignedOne[part]==assignedTwo[part];
+                const auto slot=assignBefore.at(bankMsbBase+2*part);
+                invalidSlots+=slot<1 || slot>g_partCount;
+                assignedSlot[part]=static_cast<uint8_t>(slot-1);
+                std::cout << "native-assignable part=" << part << " channel-slot=" << unsigned(slot)
+                          << " gate=" << unsigned((readWord(assignBefore,record+2)>>11)&1)
+                          << " CC1=" << unsigned(assignedOne[part])
+                          << " CC2=" << unsigned(assignedTwo[part]) << '\n';
+            }
+            std::cout << "native-assignable closed-gates=" << closedAssignGates
+                      << " invalid-assignments=" << invalidAssignments
+                      << " invalid-slots=" << invalidSlots << '\n';
+            const bool nativeAssignmentsUsable=closedAssignGates==0 &&
+                                               invalidAssignments==0 && invalidSlots==0;
+            check(nativeAssignmentsUsable,"native assignable CC assignments are usable");
+            if(nativeAssignmentsUsable)
+            {
+                std::array<uint8_t,g_partCount> firstOne{},firstTwo{};
                 for(size_t part{};part<g_partCount;++part)
                 {
                     const auto slot=assignedSlot[part];
                     const auto port=static_cast<uint8_t>(slot/g_groupSize);
                     const auto status=static_cast<uint8_t>(0xb0 | (slot%g_groupSize));
-                    const auto nextOne=static_cast<uint8_t>(40+part);
-                    const auto nextTwo=static_cast<uint8_t>(90+part);
-                    for(auto* board:{continuedAssign.get(),restoredAssign.get()})
-                    {
-                        send(*board,port,status,assignedOne[part],nextOne);
-                        send(*board,port,status,assignedTwo[part],nextTwo);
-                    }
+                    firstOne[part]=static_cast<uint8_t>(20+part);
+                    firstTwo[part]=static_cast<uint8_t>(70+part);
+                    send(*assignSource,port,status,assignedOne[part],firstOne[part]);
+                    send(*assignSource,port,status,assignedTwo[part],firstTwo[part]);
                 }
-                run(*continuedAssign,g_drainSamples);
-                run(*restoredAssign,g_drainSamples);
-                size_t continuationMismatches{};
-                const auto& continuedRam=Sc88ExecutionProbe::ram(*continuedAssign);
-                const auto& restoredRam=Sc88ExecutionProbe::ram(*restoredAssign);
+                run(*assignSource,g_drainSamples);
+                std::vector<uint8_t> assignImage;
+                check(Sc88Settings::capture(*assignSource,assignImage)==Result::Success,
+                      "capture native assignable controllers");
+                if(assignImage.size()!=Sc88::SramSize)
+                    throw std::runtime_error("native assignable image has invalid size");
+                size_t nativeAssignMismatches{},unchangedAssignValues{};
                 for(size_t part{};part<g_partCount;++part)
                 {
-                    continuationMismatches+=(continuedRam[assignableOne+2*part]!=40+part)+
-                                            (continuedRam[assignableTwo+2*part]!=90+part)+
-                                            (restoredRam[assignableOne+2*part]!=
-                                             continuedRam[assignableOne+2*part])+
-                                            (restoredRam[assignableTwo+2*part]!=
-                                             continuedRam[assignableTwo+2*part]);
+                    nativeAssignMismatches+=(assignImage[assignableOne+2*part]!=firstOne[part])+
+                                            (assignImage[assignableTwo+2*part]!=firstTwo[part]);
+                    unchangedAssignValues+=(assignImage[assignableOne+2*part]==
+                                            assignBefore[assignableOne+2*part])+
+                                           (assignImage[assignableTwo+2*part]==
+                                            assignBefore[assignableTwo+2*part]);
                 }
-                std::cout << "native-assignable C072=" << unsigned(preference)
-                          << " lost=" << lostAssignValues
-                          << " continuation-mismatches=" << continuationMismatches << '\n';
-                check(continuationMismatches==0,
-                      "native assignable CC continuation matches after restore");
+                std::cout << "native-assignable value-mismatches=" << nativeAssignMismatches
+                          << " unchanged-values=" << unchangedAssignValues << '\n';
+                check(nativeAssignMismatches==0 && unchangedAssignValues==0,
+                      "both native assignable CC values accepted on all 32 parts");
+                for(uint8_t preference:{uint8_t{0},uint8_t{1}})
+                {
+                    currentPreference=preference;
+                    auto variant=assignImage;
+                    variant[g_preference]=preference; // Diagnostic saved preference variant.
+                    auto restoredAssign=std::make_unique<Sc88>(rom,waves,model,false);
+                    const auto assignRestoreResult=Sc88Settings::restore(*restoredAssign,variant);
+                    check(assignRestoreResult==Result::Success,
+                          "restore native assignable controllers");
+                    if(assignRestoreResult!=Result::Success) continue;
+                    size_t lostAssignValues{};
+                    for(size_t part{};part<g_partCount;++part)
+                        lostAssignValues+=(Sc88ExecutionProbe::ram(*restoredAssign)[assignableOne+2*part]!=
+                                           assignImage[assignableOne+2*part])+
+                                          (Sc88ExecutionProbe::ram(*restoredAssign)[assignableTwo+2*part]!=
+                                           assignImage[assignableTwo+2*part]);
+                    check(lostAssignValues==0,"fresh restore retains both assignable values");
+                    auto continuedAssign=assignSource->cloneExecution();
+                    if(!continuedAssign) throw std::runtime_error("assignable continuation clone failed");
+                    for(size_t part{};part<g_partCount;++part)
+                    {
+                        const auto slot=assignedSlot[part];
+                        const auto port=static_cast<uint8_t>(slot/g_groupSize);
+                        const auto status=static_cast<uint8_t>(0xb0 | (slot%g_groupSize));
+                        const auto nextOne=static_cast<uint8_t>(40+part);
+                        const auto nextTwo=static_cast<uint8_t>(90+part);
+                        for(auto* board:{continuedAssign.get(),restoredAssign.get()})
+                        {
+                            send(*board,port,status,assignedOne[part],nextOne);
+                            send(*board,port,status,assignedTwo[part],nextTwo);
+                        }
+                    }
+                    run(*continuedAssign,g_drainSamples);
+                    run(*restoredAssign,g_drainSamples);
+                    size_t continuationMismatches{};
+                    const auto& continuedRam=Sc88ExecutionProbe::ram(*continuedAssign);
+                    const auto& restoredRam=Sc88ExecutionProbe::ram(*restoredAssign);
+                    for(size_t part{};part<g_partCount;++part)
+                    {
+                        continuationMismatches+=(continuedRam[assignableOne+2*part]!=40+part)+
+                                                (continuedRam[assignableTwo+2*part]!=90+part)+
+                                                (restoredRam[assignableOne+2*part]!=
+                                                 continuedRam[assignableOne+2*part])+
+                                                (restoredRam[assignableTwo+2*part]!=
+                                                 continuedRam[assignableTwo+2*part]);
+                    }
+                    std::cout << "native-assignable remapped=" << reassignControllers
+                              << " C072=" << unsigned(preference)
+                              << " lost=" << lostAssignValues
+                              << " continuation-mismatches=" << continuationMismatches << '\n';
+                    check(continuationMismatches==0,
+                          "native assignable CC continuation matches after restore");
+                }
             }
+            currentPreference=0xff;
         }
-        currentPreference=0xff;
         // SC 30C4/3585 and VL 3195/3663 address 128 pressure bytes per
         // internal part at C660. Native input, not synthetic SRAM, sets them.
         constexpr size_t pressureBase=0xc660;
