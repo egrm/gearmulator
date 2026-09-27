@@ -1,7 +1,7 @@
 #include "pluginVersion.h"
 
 #include "version.h"
-#include "versionDateTime.h"
+#include <jucePluginLib/versionDateTime.h>
 
 namespace pluginLib
 {
