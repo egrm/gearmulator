@@ -30,6 +30,10 @@ namespace hostRecallTest
 	// tools/sc88pro_state_probe.cpp::testPanelMenuRecall: Fine Tune context.
 	inline constexpr size_t proPanelPageAddress = 0x4b47;
 	inline constexpr size_t proFineTuneCursorAddress = 0x4c60;
+	// sc88pro_state_probe --system-menu-recall: A2 / page-1 Prevw Velo.
+	inline constexpr size_t proSystemCursorAddress = 0x4c68;
+	// Firmware 1.02 0D:9CA8 descriptor 4BFD, read by 0C:9293..929C.
+	inline constexpr size_t proPreviewVelocityAddress = 0x4bfd;
 	inline constexpr size_t proSelectedPartAddress = 0x4d78;
 	// Emu88Recall_test.cpp familyEqMenuRecall and eq-gain-final-context.log:
 	// native ALL EQ Gain mode and selector context.
@@ -43,6 +47,7 @@ namespace hostRecallTest
 	// Emu88Recall_test.cpp familyEqMenuRecall and
 	// recall-family-processor-eq.log: native key29 edits low EQ gain 64 to 65.
 	inline constexpr size_t sc88EqLowGainAddress = 0x8789;
+	inline constexpr size_t sc88EqLowFrequencyAddress = 0x8788;
 	inline constexpr uint8_t editedEqLowGain = 65;
 
 	inline void require(bool condition, const char* description)
@@ -198,13 +203,55 @@ namespace hostRecallTest
 			"VST3 retains the native low EQ gain edit");
 	}
 
-	inline void requireSc88NativeSeed(const MemoryBlock& actual, const MemoryBlock& seed,
-		int model, bool eqSeed, const char* levelDescription, const char* eqDescription)
+	inline void requireSc88AllContext(const MemoryBlock& actual, const MemoryBlock& seed,
+		int model, const char* description)
 	{
-		if(eqSeed)
-			requireSc88EqContext(actual, seed, model, eqDescription);
-		else
-			requireSc88PanelLevel(actual, seed, model, levelDescription);
+		const auto context = model == 0 ? sc88EqContextAddress : sc88VlEqContextAddress;
+		const auto allMode = model == 0 ? sc88AllEqPage : sc88VlAllEqPage;
+		const auto requestedMode = model == 0 ? uint8_t{0} : uint8_t{1};
+		require(sc88HardwareByte(seed, context) == allMode &&
+			sc88HardwareByte(seed, context + 1) == requestedMode &&
+			sc88HardwareByte(seed, context + 2) == 0 &&
+			sc88HardwareByte(seed, context + eqSelectorOffset) == 0,
+			"Native SC-88 ALL seed is on its normal page");
+		for(const auto offset : {size_t{0}, size_t{1}, size_t{2}, eqSelectorOffset})
+			require(sc88HardwareByte(actual, context + offset) ==
+				sc88HardwareByte(seed, context + offset), description);
+		requireSc88PanelLevel(actual, seed, model, description);
+	}
+
+	inline void requireSc88FrequencyContext(const MemoryBlock& actual, const MemoryBlock& seed,
+		int model, const char* description)
+	{
+		const auto context = model == 0 ? sc88EqContextAddress : sc88VlEqContextAddress;
+		const auto allMode = model == 0 ? sc88AllEqPage : sc88VlAllEqPage;
+		const auto title = model == 0 ? size_t{0x5354} : size_t{0x5358};
+		require(sc88HardwareByte(seed, context) == allMode &&
+			sc88HardwareByte(seed, context + 1) == allMode &&
+			sc88HardwareByte(seed, context + 2) == 0 &&
+			sc88HardwareByte(seed, context + eqSelectorOffset) == 0,
+			"Native SC-88 EQ Frequency seed is on the expected ALL page");
+		for(size_t index = 0; index < 4; ++index)
+		{
+			require(sc88HardwareByte(seed, title + index) == static_cast<uint8_t>("Freq"[index]),
+				"Native SC-88 EQ Frequency seed retains its caption");
+			require(sc88HardwareByte(actual, title + index) == sc88HardwareByte(seed, title + index),
+				description);
+		}
+		for(const auto offset : {size_t{0}, size_t{1}, size_t{2}, eqSelectorOffset})
+			require(sc88HardwareByte(actual, context + offset) ==
+				sc88HardwareByte(seed, context + offset), description);
+		require(sc88HardwareByte(actual, sc88EqLowFrequencyAddress) ==
+			sc88HardwareByte(seed, sc88EqLowFrequencyAddress), description);
+	}
+
+	inline void requireSc88NativeSeed(const MemoryBlock& actual, const MemoryBlock& seed,
+		int model, const String& seedKind, const char* description)
+	{
+		if(seedKind == "eq") requireSc88EqContext(actual, seed, model, description);
+		else if(seedKind == "all") requireSc88AllContext(actual, seed, model, description);
+		else if(seedKind == "eq-frequency") requireSc88FrequencyContext(actual, seed, model, description);
+		else requireSc88PanelLevel(actual, seed, model, description);
 	}
 
 	inline unsigned hardwareWord(const MemoryBlock& componentState, size_t address)
@@ -226,6 +273,20 @@ namespace hostRecallTest
 			hardwareWord(seed, proFineTuneCursorAddress) &&
 			hardwareWord(actual, proSelectedPartAddress) ==
 			hardwareWord(seed, proSelectedPartAddress), description);
+	}
+
+	inline void requireProSystemContext(const MemoryBlock& actual, const MemoryBlock& seed,
+		const char* description)
+	{
+		require(sc88HardwareByte(seed, proPanelPageAddress) == 1 &&
+			hardwareWord(seed, proSystemCursorAddress) == 0x10 &&
+			hardwareWord(seed, proSelectedPartAddress) == 1 &&
+			sc88HardwareByte(seed, proPreviewVelocityAddress) == 101,
+			"Native Pro seed selects A2 System Prevw Velo with edited value 101");
+		require(sc88HardwareByte(actual, proPanelPageAddress) == 1 &&
+			hardwareWord(actual, proSystemCursorAddress) == 0x10 &&
+			hardwareWord(actual, proSelectedPartAddress) == 1 &&
+			sc88HardwareByte(actual, proPreviewVelocityAddress) == 101, description);
 	}
 
 	inline void requireHostOwnedRouting(const MemoryBlock& componentState)
@@ -313,7 +374,7 @@ namespace hostRecallTest
 	}
 
 	inline int readFreshProcess(const PluginDescription& description, const String& fixturePath,
-		int expectedModel = -1, const String& nativeComponentPath = {}, bool eqSeed = false)
+		int expectedModel = -1, const String& nativeComponentPath = {}, const String& seedKind = {})
 	{
 		MemoryBlock saved, expectedAudio;
 		require(File(fixturePath).loadFileAsData(saved), "Read prior-process VST3 state");
@@ -330,17 +391,20 @@ namespace hostRecallTest
 			MemoryBlock nativeComponent;
 			require(File(nativeComponentPath).loadFileAsData(nativeComponent),
 				"Fresh process reads the native panel-edited source image");
-				requireSc88NativeSeed(componentStateFromHost(save(*restored)), nativeComponent,
-					expectedModel, eqSeed, "Fresh process retains the native panel LevelR value",
-					"Fresh process retains the native ALL EQ Gain context");
+			requireSc88NativeSeed(componentStateFromHost(save(*restored)), nativeComponent,
+					expectedModel, seedKind, "Fresh process retains the native SC-88 panel context");
 		}
 		if(nativeComponentPath.isNotEmpty() && expectedModel == 2)
 		{
 			MemoryBlock nativeComponent;
 			require(File(nativeComponentPath).loadFileAsData(nativeComponent),
 				"Fresh process reads the native Pro panel source image");
-			requireProPanelContext(componentStateFromHost(save(*restored)), nativeComponent,
-				"Fresh process retains the native Pro Fine Tune menu context");
+			if(seedKind == "pro-system")
+				requireProSystemContext(componentStateFromHost(save(*restored)), nativeComponent,
+					"Fresh process retains the native Pro System menu context");
+			else
+				requireProPanelContext(componentStateFromHost(save(*restored)), nativeComponent,
+					"Fresh process retains the native Pro Fine Tune menu context");
 		}
 		const auto audio = render(*restored, auditionNotes(), auditionBlocks);
 		require(MemoryBlock(audio.data(), audio.size() * sizeof(float)) == expectedAudio,
@@ -350,7 +414,7 @@ namespace hostRecallTest
 	}
 
 	inline int run(const PluginDescription& description, const String& fixturePath,
-		int expectedModel = -1, const String& nativeComponentPath = {}, bool eqSeed = false)
+		int expectedModel = -1, const String& nativeComponentPath = {}, const String& seedKind = {})
 	{
 		AudioPluginFormatManager manager;
 		manager.addDefaultFormats();
@@ -394,11 +458,16 @@ namespace hostRecallTest
 			requireModel(saved, expectedModel);
 			if(expectedModel == 0 || expectedModel == 1)
 				requireSc88NativeSeed(componentStateFromHost(saved), nativeComponent,
-					expectedModel, eqSeed, "Native panel LevelR survives a fresh VST3 capture",
-					"Native ALL EQ Gain context survives a fresh VST3 capture");
+					expectedModel, seedKind, "Native SC-88 panel context survives a fresh VST3 capture");
 			if(expectedModel == 2)
-				requireProPanelContext(componentStateFromHost(saved), nativeComponent,
-					"Native Pro Fine Tune menu survives a fresh VST3 capture");
+			{
+				if(seedKind == "pro-system")
+					requireProSystemContext(componentStateFromHost(saved), nativeComponent,
+						"Native Pro System menu survives a fresh VST3 capture");
+				else
+					requireProPanelContext(componentStateFromHost(saved), nativeComponent,
+						"Native Pro Fine Tune menu survives a fresh VST3 capture");
+			}
 		}
 		else
 		{
@@ -499,11 +568,16 @@ namespace hostRecallTest
 		require(save(*restored) == saved, "Load then Save preserves state before any audio callback");
 		if(nativeComponentPath.isNotEmpty() && (expectedModel == 0 || expectedModel == 1))
 			requireSc88NativeSeed(componentStateFromHost(save(*restored)), nativeComponent,
-				expectedModel, eqSeed, "Fresh VST3 instance restores the native panel LevelR value",
-				"Fresh VST3 instance restores the native ALL EQ Gain context");
+				expectedModel, seedKind, "Fresh VST3 instance restores the native SC-88 panel context");
 		if(nativeComponentPath.isNotEmpty() && expectedModel == 2)
-			requireProPanelContext(componentStateFromHost(save(*restored)), nativeComponent,
-				"Fresh VST3 instance restores the native Pro Fine Tune menu context");
+		{
+			if(seedKind == "pro-system")
+				requireProSystemContext(componentStateFromHost(save(*restored)), nativeComponent,
+					"Fresh VST3 instance restores the native Pro System menu context");
+			else
+				requireProPanelContext(componentStateFromHost(save(*restored)), nativeComponent,
+					"Fresh VST3 instance restores the native Pro Fine Tune menu context");
+		}
 		auto duplicate = create(manager, description);
 		duplicate->setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
 		require(save(*duplicate) == saved, "A second fresh instance restores the same state");

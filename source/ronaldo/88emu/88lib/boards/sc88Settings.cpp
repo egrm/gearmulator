@@ -82,6 +82,13 @@ namespace emu88Lib
 		constexpr uint8_t g_eqGainSelector = 0;
 		constexpr unsigned g_allSelectorPositions = 4;
 		constexpr std::string_view g_eqGainTitle = "ALLEQ Gain";
+		constexpr std::string_view g_eqFrequencyTitle = "ALLEQ Freq";
+		constexpr std::string_view g_plainAllTitle = "ALL- SOUND Canvas -";
+		// Native Gain→Freq panel capture (eq-frequency-native-delta.log) changes
+		// the firmware's four ASCII title bytes at SC 5354 / VL 5358. The
+		// live boundary also checks the LCD itself before trusting this image.
+		constexpr size_t g_sc88EqLabel = 0x5354, g_sc88vlEqLabel = 0x5358;
+		constexpr std::string_view g_eqGainLabel = "Gain", g_eqFrequencyLabel = "Freq";
 		// The source-verified dispatcher idle loops are SC 00:06B7/06BB/06BE
 		// and VL 00:0733/0737/073A (family idle disassemblies).
 		constexpr std::array<uint32_t,3> g_sc88IdlePc{0x06b7,0x06bb,0x06be};
@@ -243,17 +250,30 @@ namespace emu88Lib
 		{
 			const auto mode = ram[sc ? g_sc88MenuMode : g_sc88vlMenuMode];
 			const auto requestedMode = ram[sc ? g_sc88MenuRequest : g_sc88vlMenuRequest];
-			if(mode != requestedMode ||
-			   (mode != (sc ? g_sc88NormalMode : g_sc88vlNormalMode) &&
-			    mode != (sc ? g_sc88AllMode : g_sc88vlAllMode))) return false;
-			if(mode == (sc ? g_sc88AllMode : g_sc88vlAllMode))
+			const auto normalMode = sc ? g_sc88NormalMode : g_sc88vlNormalMode;
+			const auto allMode = sc ? g_sc88AllMode : g_sc88vlAllMode;
+			if(mode != normalMode && mode != allMode) return false;
+			if(mode == normalMode && requestedMode != normalMode) return false;
+			if(mode == allMode)
 			{
+				// Only selector zero has native restore coverage for both
+				// the plain ALL screen and its Gain/Frequency subviews.
 				if(ram[sc ? g_sc88AllSelector : g_sc88vlAllSelector] != g_eqGainSelector)
 					return false;
 				const auto& lcd = board.m_lcd;
 				std::string visible(lcd.getVisibleColumns()*lcd.getVisibleLines(),' ');
 				lcd.copyVisibleDdRam(visible.data());
-				if(visible.substr(0,g_eqGainTitle.size()) != g_eqGainTitle) return false;
+				if(requestedMode == normalMode)
+				{
+					if(visible.substr(0,g_plainAllTitle.size()) != g_plainAllTitle) return false;
+				}
+				else if(requestedMode == allMode)
+				{
+					if((visible.substr(0,g_eqGainTitle.size()) != g_eqGainTitle &&
+					    visible.substr(0,g_eqFrequencyTitle.size()) != g_eqFrequencyTitle))
+						return false;
+				}
+				else return false;
 			}
 		}
 		for(size_t key{};key<std::numeric_limits<decltype(board.m_buttons)>::digits;++key)
@@ -300,6 +320,7 @@ namespace emu88Lib
 		const auto normalMode = board.m_model == Model::Sc88 ? g_sc88NormalMode : g_sc88vlNormalMode;
 		const auto allMode = board.m_model == Model::Sc88 ? g_sc88AllMode : g_sc88vlAllMode;
 		const auto allSelector = board.m_model == Model::Sc88 ? g_sc88AllSelector : g_sc88vlAllSelector;
+		const auto eqLabel = board.m_model == Model::Sc88 ? g_sc88EqLabel : g_sc88vlEqLabel;
 		const auto savedSelection = readWord(image,selectedIndex);
 		if(savedSelection >= g_parts) return Result::InvalidImage;
 		// Only normal and UserInst pages have source-backed fresh-board panel
@@ -309,11 +330,28 @@ namespace emu88Lib
 		if(image[panelPage]==g_userInstrumentPage &&
 		   (image[userGroup]<g_firstUserGroup || image[userGroup]>g_lastUserGroup))
 			return Result::InvalidImage;
-		if(image[panelPage]==g_normalPage &&
-		   (image[menuMode]!=image[menuRequest] ||
-		    (image[menuMode]!=normalMode && image[menuMode]!=allMode) ||
-		    (image[menuMode]==allMode && image[allSelector]!=g_eqGainSelector)))
-			return Result::InvalidImage;
+		bool savedFrequency = false;
+		if(image[panelPage]==g_normalPage)
+		{
+			if(image[menuMode]==normalMode)
+			{
+				if(image[menuRequest]!=normalMode) return Result::InvalidImage;
+			}
+			else if(image[menuMode]==allMode)
+			{
+				if(image[allSelector]!=g_eqGainSelector) return Result::InvalidImage;
+				if(image[menuRequest]==allMode)
+				{
+					const auto gain=std::equal(g_eqGainLabel.begin(),g_eqGainLabel.end(),
+					                           image.begin()+eqLabel);
+					savedFrequency=std::equal(g_eqFrequencyLabel.begin(),g_eqFrequencyLabel.end(),
+					                          image.begin()+eqLabel);
+					if(!gain && !savedFrequency) return Result::InvalidImage;
+				}
+				else if(image[menuRequest]!=normalMode) return Result::InvalidImage;
+			}
+			else return Result::InvalidImage;
+		}
 		std::array<uint8_t,g_meterCount> freshMeters{};
 		std::array<uint8_t,g_accumulatorBytes> freshAccumulator{};
 		std::array<uint8_t,g_voiceOwnerCount> freshVoiceOwners{};
@@ -356,20 +394,30 @@ namespace emu88Lib
 		}
 		if(image[panelPage]==g_normalPage && image[menuMode]==allMode)
 		{
-			// The ALL selector can start at any of its four ROM positions.
-			// Enter through the native panel, then cycle to the saved EQ Gain
-			// position so firmware rebuilds the descriptor and LCD.
+			// Enter the saved ALL scope through the native panel. Plain ALL
+			// remains there; EQ screens use SELECT and optionally the native
+			// Gain→Frequency edit key to rebuild firmware-owned descriptors.
 			pressPanel(board,buttonBit(Button::InstAll));
-			for(unsigned move{};move<g_allSelectorPositions;++move)
+			if(image[menuRequest]==allMode)
 			{
-				pressPanel(board,buttonBit(Button::Select));
-				if(board.m_sram[allSelector]==g_eqGainSelector &&
-				   board.m_sram[menuMode]==allMode &&
-				   board.m_sram[menuRequest]==allMode) break;
+				for(unsigned move{};move<g_allSelectorPositions;++move)
+				{
+					pressPanel(board,buttonBit(Button::Select));
+					if(board.m_sram[allSelector]==g_eqGainSelector &&
+					   board.m_sram[menuMode]==allMode &&
+					   board.m_sram[menuRequest]==allMode) break;
+				}
+				if(savedFrequency) pressPanel(board,buttonBit(Button::VibRateR));
 			}
 			if(board.m_sram[allSelector]!=g_eqGainSelector ||
-			   board.m_sram[menuMode]!=allMode || board.m_sram[menuRequest]!=allMode ||
+			   board.m_sram[menuMode]!=allMode || board.m_sram[menuRequest]!=image[menuRequest] ||
 			   board.m_sram[panelPage]!=g_normalPage) return Result::InvalidImage;
+			const auto& lcd=board.m_lcd;
+			std::string visible(lcd.getVisibleColumns()*lcd.getVisibleLines(),' ');
+			lcd.copyVisibleDdRam(visible.data());
+			const auto title=image[menuRequest]==normalMode ? g_plainAllTitle :
+			                 savedFrequency ? g_eqFrequencyTitle : g_eqGainTitle;
+			if(visible.substr(0,title.size())!=title) return Result::InvalidImage;
 		}
 		std::copy_n(image.begin()+g_polyPressureBase,g_parts*g_polyPressureKeys,
 		            board.m_sram.begin()+g_polyPressureBase);

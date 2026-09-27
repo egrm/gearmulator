@@ -209,6 +209,43 @@ namespace
                 std::cout << "ALL before SELECT model=" << static_cast<int>(model)
                           << " caption=" << beforeSelect->screens[0].text.front()
                           << " captureBoundary=" << source.hardware()->isSettingsBoundary() << '\n';
+            const auto plainAllChunk=save(source);
+            const auto plainAll=hardware(plainAllChunk).memory;
+            const auto contextBase=model==emu88Lib::DeviceModel::Sc88?size_t{0x54d0}:size_t{0x54d8};
+            std::cout << "ALL native context model=" << static_cast<int>(model) << " bytes=";
+            for(size_t offset{};offset<8;++offset) std::cout << unsigned(plainAll.at(contextBase+offset)) << ',';
+            std::cout << '\n';
+            emu88Player::Processor plainRestored;
+            load(plainRestored,plainAllChunk);
+            plainRestored.setRateAndBufferSizeDetails(44100,128);
+            plainRestored.prepareToPlay(44100,128);
+            render(plainRestored,128);
+            const auto plainDisplay=plainRestored.hardwareDisplaySnapshot();
+            CHECK(plainDisplay.has_value());
+            if(beforeSelect && plainDisplay)
+                CHECK(beforeSelect->screens[0].text.front().substr(0,20)==
+                      plainDisplay->screens[0].text.front().substr(0,20));
+            // Leave ALL through the native button, then prove normal Level
+            // editing addresses the same selected part after fresh restore.
+            const auto all=emu88Lib::buttonBit(emu88Lib::Button::InstAll);
+            source.clickPanelButton(all,0);
+            plainRestored.clickPanelButton(all,0);
+            render(source,44100/2);
+            render(plainRestored,44100/2);
+            const auto selectedAddress=model==emu88Lib::DeviceModel::Sc88?size_t{0x56f0}:size_t{0x56fa};
+            const auto part=(size_t{plainAll[selectedAddress]}<<8)|plainAll[selectedAddress+1];
+            CHECK(part<32);
+            const auto levelAddress=(part<16?size_t{0x8088}:size_t{0x9588})+(part%16)*0x70+8;
+            const auto baselineLevel=plainAll.at(levelAddress);
+            source.clickPanelButton(emu88Lib::buttonBit(emu88Lib::Button::LevelR),0);
+            plainRestored.clickPanelButton(emu88Lib::buttonBit(emu88Lib::Button::LevelR),0);
+            CHECK_EQ(hardware(save(source)).memory.at(levelAddress),baselineLevel+1);
+            CHECK_EQ(hardware(save(plainRestored)).memory.at(levelAddress),baselineLevel+1);
+            const auto plainFixture=juce::File(emu88Player::defaultDataFolder()).getChildFile(
+                "all-model-"+juce::String(static_cast<int>(model))+".component");
+            CHECK(plainFixture.replaceWithData(plainAllChunk.getData(),plainAllChunk.getSize()));
+            source.clickPanelButton(all,0);
+            render(source,44100/2);
             source.clickPanelButton(emu88Lib::buttonBit(emu88Lib::Button::Select),0);
             // Unlike Save's private execution clone, live panel publication
             // advances only when this processor renders. The owner manual's
@@ -228,7 +265,94 @@ namespace
             if(!eqVisible) continue;
             const auto opened=save(source);
             CHECK(hardware(opened).model==model);
-            const auto contextBase=model==emu88Lib::DeviceModel::Sc88?size_t{0x54d0}:size_t{0x54d8};
+            emu88Player::Processor frequencyProbe;
+            load(frequencyProbe,opened);
+            frequencyProbe.setRateAndBufferSizeDetails(44100,128);
+            frequencyProbe.prepareToPlay(44100,128);
+            render(frequencyProbe,128);
+            frequencyProbe.setPanelButtons(emu88Lib::buttonBit(emu88Lib::Button::VibRateR));
+            render(frequencyProbe,4410);
+            frequencyProbe.setPanelButtons(0);
+            render(frequencyProbe,11025);
+            const auto frequencyDisplay=frequencyProbe.hardwareDisplaySnapshot();
+            CHECK(frequencyDisplay.has_value());
+            if(frequencyDisplay)
+            {
+                std::cout << "EQ Frequency native model=" << static_cast<int>(model)
+                          << " caption=" << frequencyDisplay->screens[0].text.front() << '\n';
+                CHECK(frequencyDisplay->screens[0].text.front().rfind("ALLEQ Freq",0)==0);
+            }
+            const auto frequencyChunk=save(frequencyProbe);
+            emu88Player::Processor frequencyRestored;
+            load(frequencyRestored,frequencyChunk);
+            frequencyRestored.setRateAndBufferSizeDetails(44100,128);
+            frequencyRestored.prepareToPlay(44100,128);
+            render(frequencyRestored,128);
+            const auto frequencyReopened=frequencyRestored.hardwareDisplaySnapshot();
+            CHECK(frequencyReopened.has_value());
+            if(frequencyDisplay && frequencyReopened)
+                CHECK(frequencyDisplay->screens[0].text.front().substr(0,20)==
+                      frequencyReopened->screens[0].text.front().substr(0,20));
+            const auto editFrequency=[](emu88Player::Processor& processor,
+                                        emu88Lib::Button button)
+            {
+                processor.setPanelButtons(emu88Lib::buttonBit(button));
+                render(processor,4410);
+                processor.setPanelButtons(0);
+                render(processor,11025);
+            };
+            editFrequency(frequencyProbe,emu88Lib::Button::VibDepthR);
+            editFrequency(frequencyRestored,emu88Lib::Button::VibDepthR);
+            // EQ Low Frequency is the first byte of the retained global EQ
+            // block (the Gain fixture already covers its following byte).
+            const auto lowFrequencyAddress=size_t{0x8788};
+            const auto frequencyBefore=hardware(frequencyChunk).memory;
+            const auto frequencyNativeAfter=hardware(save(frequencyProbe)).memory;
+            const auto frequencyReopenedAfter=hardware(save(frequencyRestored)).memory;
+            CHECK(frequencyNativeAfter.at(lowFrequencyAddress)!=
+                  frequencyBefore.at(lowFrequencyAddress));
+            CHECK_EQ(frequencyReopenedAfter.at(lowFrequencyAddress),
+                     frequencyNativeAfter.at(lowFrequencyAddress));
+            const auto frequencyEdited=frequencyProbe.hardwareDisplaySnapshot();
+            const auto frequencyRestoredEdited=frequencyRestored.hardwareDisplaySnapshot();
+            CHECK(frequencyEdited.has_value() && frequencyRestoredEdited.has_value());
+            if(frequencyDisplay && frequencyEdited && frequencyRestoredEdited)
+            {
+                CHECK(eqValues(frequencyEdited->screens[0].text.front())!=
+                      eqValues(frequencyDisplay->screens[0].text.front()));
+                CHECK(eqValues(frequencyEdited->screens[0].text.front())==
+                      eqValues(frequencyRestoredEdited->screens[0].text.front()));
+            }
+            const auto frequencyEditedChunk=save(frequencyProbe);
+            emu88Player::Processor frequencyEditedRestored;
+            load(frequencyEditedRestored,frequencyEditedChunk);
+            frequencyEditedRestored.setRateAndBufferSizeDetails(44100,128);
+            frequencyEditedRestored.prepareToPlay(44100,128);
+            render(frequencyEditedRestored,128);
+            const auto frequencyRetained=frequencyEditedRestored.hardwareDisplaySnapshot();
+            CHECK(frequencyRetained.has_value());
+            if(frequencyEdited && frequencyRetained)
+                CHECK(eqValues(frequencyEdited->screens[0].text.front())==
+                      eqValues(frequencyRetained->screens[0].text.front()));
+            // Native low frequency has only 200/400 Hz positions (Roland
+            // SC-88 owner's manual). From the saved 400 Hz state, exercise
+            // the source-verified left decrement instead of saturating right.
+            editFrequency(frequencyProbe,emu88Lib::Button::VibDepthL);
+            editFrequency(frequencyEditedRestored,emu88Lib::Button::VibDepthL);
+            const auto frequencySecond=frequencyProbe.hardwareDisplaySnapshot();
+            const auto frequencySecondRestored=frequencyEditedRestored.hardwareDisplaySnapshot();
+            CHECK(frequencySecond.has_value() && frequencySecondRestored.has_value());
+            if(frequencyEdited && frequencySecond && frequencySecondRestored)
+            {
+                CHECK(eqValues(frequencySecond->screens[0].text.front())!=
+                      eqValues(frequencyEdited->screens[0].text.front()));
+                CHECK(eqValues(frequencySecond->screens[0].text.front())==
+                      eqValues(frequencySecondRestored->screens[0].text.front()));
+            }
+            const auto frequencyFixture=juce::File(emu88Player::defaultDataFolder()).getChildFile(
+                "eq-frequency-model-"+juce::String(static_cast<int>(model))+".component");
+            CHECK(frequencyFixture.replaceWithData(frequencyEditedChunk.getData(),
+                                                   frequencyEditedChunk.getSize()));
             const auto printContext=[&](const char* phase,const std::vector<uint8_t>& memory)
             {
                 std::cout << "EQ context model=" << static_cast<int>(model)
