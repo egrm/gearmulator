@@ -578,6 +578,36 @@ void traceUserInstAudio(const std::vector<uint8_t>& editedImage,
     require(controlIdleDifference==0,"UserInst control already differs before note input");
     require(notePeak>idlePeak && controlDifference>0,
             "native UserInst filter/envelope control did not change sounding PCM");
+    // Align a no-note source with the sounding source before capturing;
+    // reopening the latter must discard voices but retain these same edits.
+    run(*idleFirst,g_sampleRate-g_sampleRate/10);
+    std::vector<uint8_t> silentImage,activeImage;
+    require(Sc88Settings::capture(*idleFirst,silentImage)==Sc88Settings::Result::Success &&
+            Sc88Settings::capture(*first,activeImage)==Sc88Settings::Result::Success,
+            "active UserInst image capture failed");
+    auto silentReopen=reopen(silentImage);
+    auto activeReopen=reopen(activeImage);
+    auto silentContinuation=silentReopen->cloneExecution();
+    auto activeContinuation=activeReopen->cloneExecution();
+    require(silentContinuation && activeContinuation,"active UserInst continuation clone failed");
+    size_t activeIdleDifference{},activeNextDifference{};
+    int64_t activeIdlePeak{};
+    for(unsigned sample{};sample<g_sampleRate;++sample)
+    {
+        const auto a=activeContinuation->renderSample(),b=silentContinuation->renderSample();
+        activeIdleDifference+=a!=b;
+        activeIdlePeak=std::max(activeIdlePeak,peak(a));
+    }
+    note.b=64;
+    silentReopen->addMidiEvent(note,0);
+    activeReopen->addMidiEvent(note,0);
+    for(unsigned sample{};sample<g_sampleRate;++sample)
+        activeNextDifference+=silentReopen->renderSample()!=activeReopen->renderSample();
+    std::cout << "UserInst-active-recall model=" << static_cast<int>(model)
+              << " idle-difference=" << activeIdleDifference << " idle-peak=" << activeIdlePeak
+              << " immediate-note-difference=" << activeNextDifference << '\n';
+    require(activeIdleDifference==0 && activeNextDifference==0,
+            "active UserInst capture differs from aligned no-note recall");
 }
 
 bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
