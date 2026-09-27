@@ -123,8 +123,10 @@ int main(const int _argc, char* _argv[])
 			recallSeed == "producer-wet" || recallSeed == "producer-dry" ||
 			recallSeed == "producer-bank";
 		const bool proSeed = recallSeed == "pro-system" ||
-			recallSeed == "producer-pro-wet" || recallSeed == "producer-pro-dry";
-		const bool additionalFamilySeed = recallSeed == "producer-sc55mk1" && recallModel == 5;
+			recallSeed == "producer-pro-wet" || recallSeed == "producer-pro-dry" ||
+			recallSeed == "producer-pro-bank";
+		const bool additionalFamilySeed = (recallSeed == "producer-sc55mk1" && recallModel == 5) ||
+			((recallSeed == "producer-mt32old-dry" || recallSeed == "producer-mt32old-wet") && recallModel == 21);
 		if(!recallSeed.empty() && (!cmdLine.contains("recall-component") ||
 			!(sc88Seed && (recallModel == 0 || recallModel == 1)) &&
 			!(proSeed && recallModel == 2) && !additionalFamilySeed))

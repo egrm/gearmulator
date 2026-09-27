@@ -214,6 +214,54 @@ namespace
                 juce::String("producer-pro-") + scenario.first + "-model-2.component");
             CHECK(path.replaceWithData(scenario.second->getData(), scenario.second->getSize()));
         }
+
+        // SC-88Pro owner's manual pp.126-127: Native-map Piano3w is CC0 8,
+        // CC32 3, PC 2. Observe the committed part descriptor separately from
+        // the bank latches by changing those latches after the program change.
+        juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
+        emu88Player::Processor bankSource;
+        CHECK(bankSource.setDeviceModel(emu88Lib::DeviceModel::Sc88Pro));
+        bankSource.setRateAndBufferSizeDetails(sampleRate, blockSize);
+        bankSource.prepareToPlay(sampleRate, blockSize);
+        juce::MidiBuffer bankEdit;
+        bankEdit.addEvent(juce::MidiMessage::controllerEvent(1, 0, 8), 11);
+        bankEdit.addEvent(juce::MidiMessage::controllerEvent(1, 32, 3), 23);
+        bankEdit.addEvent(juce::MidiMessage::programChange(1, 2), 37);
+        render(bankSource, blockSize, bankEdit);
+        const auto committedBank = hardware(save(bankSource));
+        const auto bankDescriptor = proDescriptor(committedBank);
+        juce::MidiBuffer pendingEdit;
+        pendingEdit.addEvent(juce::MidiMessage::controllerEvent(1, 0, 0), 11);
+        pendingEdit.addEvent(juce::MidiMessage::controllerEvent(1, 32, 1), 23);
+        render(bankSource, blockSize, pendingEdit);
+        const auto pendingBank = hardware(save(bankSource));
+        CHECK_EQ(committedBank.memory.at(bankDescriptor), 8);
+        CHECK_EQ(committedBank.memory.at(bankDescriptor + proProgramOffset), 2);
+        CHECK_EQ(pendingBank.memory.at(bankDescriptor), 8);
+        CHECK_EQ(pendingBank.memory.at(bankDescriptor + proProgramOffset), 2);
+        // MIDI channel 2 is firmware part slot 1; these are pending CC
+        // selectors, deliberately different from the committed Piano3w tone.
+        constexpr size_t proPartOneBankMsb = 0xc860 + 2;
+        constexpr size_t proPartOneMapLsb = 0xc820 + 2;
+        CHECK_EQ(committedBank.memory.at(proPartOneBankMsb), 8);
+        CHECK_EQ(committedBank.memory.at(proPartOneMapLsb), 3);
+        CHECK_EQ(pendingBank.memory.at(proPartOneBankMsb), 0);
+        CHECK_EQ(pendingBank.memory.at(proPartOneMapLsb), 1);
+        const auto bankComponent = save(bankSource);
+        juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_VST3);
+        emu88Player::Processor bankRestored;
+        bankRestored.setStateInformation(bankComponent.getData(),
+            static_cast<int>(bankComponent.getSize()));
+        CHECK(bankRestored.lastStateOperationSucceeded());
+        const auto restoredBank = hardware(save(bankRestored));
+        CHECK_EQ(proDescriptor(restoredBank), bankDescriptor);
+        CHECK_EQ(restoredBank.memory.at(bankDescriptor), 8);
+        CHECK_EQ(restoredBank.memory.at(bankDescriptor + proProgramOffset), 2);
+        CHECK_EQ(restoredBank.memory.at(proPartOneBankMsb), 0);
+        CHECK_EQ(restoredBank.memory.at(proPartOneMapLsb), 1);
+        CHECK(juce::File(emu88Player::defaultDataFolder())
+            .getChildFile("producer-pro-bank-model-2.component")
+            .replaceWithData(bankComponent.getData(), bankComponent.getSize()));
         std::cout << "producer native Pro program="
                   << unsigned(wetHardware.memory.at(descriptor + proProgramOffset))
                   << " reverb-wet=" << unsigned(wetHardware.memory.at(descriptor + proReverbSendOffset))

@@ -366,6 +366,48 @@ namespace hostRecallTest
 				description);
 	}
 
+	inline void requireProProducerBank(const MemoryBlock& actual, const MemoryBlock& seed,
+		const char* description)
+	{
+		// Emu88ProducerRecall_test.cpp selects Piano3w through CC0=8,
+		// CC32=3, PC=2, then stages different bank selectors without PC.
+		constexpr size_t partOneBankMsb = 0xc862;
+		constexpr size_t partOneMapLsb = 0xc822;
+		const auto descriptor = proProducerDescriptor(seed);
+		require(proProducerDescriptor(actual) == descriptor, description);
+		require(sc88HardwareByte(seed, descriptor) == 8 &&
+			sc88HardwareByte(seed, descriptor + 1) == 2 &&
+			sc88HardwareByte(seed, partOneBankMsb) == 0 &&
+			sc88HardwareByte(seed, partOneMapLsb) == 1,
+			"Native Pro bank seed commits Piano3w and retains different pending selectors");
+		for(const auto address : {descriptor, descriptor + 1,
+			partOneBankMsb, partOneMapLsb})
+			require(sc88HardwareByte(actual, address) == sc88HardwareByte(seed, address),
+				description);
+	}
+
+	// SettingsChunk::encode writes a 40-byte prefix, followed by the 261-byte
+	// LaSettings layout-1 image and a 16-byte digest. Decode JUCE's base64
+	// once per component so the paired comparison stays bounded.
+	inline constexpr size_t mt32ChunkMemoryOffset = 40;
+	inline constexpr size_t mt32ImageBytes = 261;
+	inline constexpr size_t mt32ChunkDigestBytes = 16;
+	inline constexpr size_t mt32ReverbLevelOffset = 3;
+
+	inline MemoryBlock mt32HardwareChunk(const MemoryBlock& component)
+	{
+		auto envelope = parseXML(String::fromUTF8(
+			static_cast<const char*>(component.getData()), static_cast<int>(component.getSize())));
+		const auto* payload = envelope ? envelope->getChildByName("Payload") : nullptr;
+		const auto* hardware = payload ? payload->getChildByName("Hardware") : nullptr;
+		require(hardware != nullptr, "MT-32 component contains Hardware");
+		MemoryBlock chunk;
+		require(chunk.fromBase64Encoding(hardware->getAllSubText()) &&
+			chunk.getSize() == mt32ChunkMemoryOffset + mt32ImageBytes + mt32ChunkDigestBytes,
+			"MT-32 component contains complete LaSettings layout-1 image");
+		return chunk;
+	}
+
 	inline void requireAdditionalFamilySeed(const MemoryBlock& actual,
 		const MemoryBlock& seed, int model, const String& seedKind,
 		const char* description)
@@ -384,6 +426,23 @@ namespace hostRecallTest
 					description);
 			return;
 		}
+		if(model == 21 && (seedKind == "producer-mt32old-dry" ||
+		                    seedKind == "producer-mt32old-wet"))
+		{
+			// LaSettings.h layout 1: system 4, patch head 7, patch tail 2,
+			// timbre temp 246, physical knob 2. Native panel probe selected
+			// patch group 0 / timbre 63; DT1 sets system reverb level 0 or 1.
+			constexpr size_t patchGroup = 4;
+			constexpr size_t patchTimbre = 5;
+			const auto sourceChunk = mt32HardwareChunk(seed);
+			const auto actualChunk = mt32HardwareChunk(actual);
+			const auto* sourceMemory = static_cast<const uint8_t*>(sourceChunk.getData()) + mt32ChunkMemoryOffset;
+			require(sourceMemory[patchGroup] == 0 && sourceMemory[patchTimbre] == 63 &&
+				sourceMemory[mt32ReverbLevelOffset] == (seedKind == "producer-mt32old-dry" ? 0 : 1),
+				"Native MT-32 producer seed selects Sitar and requested reverb level");
+			require(actualChunk == sourceChunk, description);
+			return;
+		}
 		throw std::runtime_error("Additional-family VST3 seed has no verified model-specific oracle");
 	}
 
@@ -399,10 +458,17 @@ namespace hostRecallTest
 				"VST3 excludes host-owned audio and physical MIDI routing");
 	}
 
-	inline MidiBuffer auditionNotes()
+	inline int hostMidiChannel(int model)
+	{
+		// deviceModel.h::firstMidiChannel: LA part one receives on MIDI
+		// channel two. JUCE MidiMessage channels are one-based.
+		return model == 21 ? 2 : 1;
+	}
+
+	inline MidiBuffer auditionNotes(int model = -1)
 	{
 		MidiBuffer notes;
-		notes.addEvent(MidiMessage::noteOn(1, 60, static_cast<uint8>(96)), 13);
+		notes.addEvent(MidiMessage::noteOn(hostMidiChannel(model), 60, static_cast<uint8>(96)), 13);
 		return notes;
 	}
 
@@ -452,7 +518,7 @@ namespace hostRecallTest
 		auto restored = create(manager, description);
 		restored->setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
 		require(save(*restored) == saved, "Fresh process preserves powered-off VST3 state");
-		const auto audio = render(*restored, auditionNotes(), auditionBlocks);
+		const auto audio = render(*restored, auditionNotes(expectedModel), auditionBlocks);
 		require(std::all_of(audio.begin(), audio.end(), [](float sample) { return sample == 0.f; }),
 			"Fresh process keeps powered-off VST3 silent");
 		restored->releaseResources();
@@ -497,7 +563,10 @@ namespace hostRecallTest
 			MemoryBlock nativeComponent;
 			require(File(nativeComponentPath).loadFileAsData(nativeComponent),
 				"Fresh process reads the native Pro panel source image");
-			if(seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry")
+			if(seedKind == "producer-pro-bank")
+				requireProProducerBank(componentStateFromHost(save(*restored)), nativeComponent,
+					"Fresh process retains committed Pro bank and pending selectors");
+			else if(seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry")
 				requireProProducerSound(componentStateFromHost(save(*restored)), nativeComponent,
 					seedKind == "producer-pro-dry", "Fresh process retains native Pro producer sound");
 			else if(seedKind == "pro-system")
@@ -507,15 +576,15 @@ namespace hostRecallTest
 				requireProPanelContext(componentStateFromHost(save(*restored)), nativeComponent,
 					"Fresh process retains the native Pro Fine Tune menu context");
 		}
-		if(nativeComponentPath.isNotEmpty() && expectedModel == 5)
+		if(nativeComponentPath.isNotEmpty() && (expectedModel == 5 || expectedModel == 21))
 		{
 			MemoryBlock nativeComponent;
 			require(File(nativeComponentPath).loadFileAsData(nativeComponent),
-				"Fresh process reads the native SC-55mk1 source image");
+				"Fresh process reads the additional-family source image");
 			requireAdditionalFamilySeed(componentStateFromHost(save(*restored)), nativeComponent,
-				expectedModel, seedKind, "Fresh process retains native SC-55mk1 sound edits");
+				expectedModel, seedKind, "Fresh process retains additional-family sound edits");
 		}
-		const auto audio = render(*restored, auditionNotes(), auditionBlocks);
+		const auto audio = render(*restored, auditionNotes(expectedModel), auditionBlocks);
 		require(MemoryBlock(audio.data(), audio.size() * sizeof(float)) == expectedAudio,
 			"Fresh process produces identical recalled audio");
 		restored->releaseResources();
@@ -570,7 +639,10 @@ namespace hostRecallTest
 					expectedModel, seedKind, "Native SC-88 panel context survives a fresh VST3 capture");
 			if(expectedModel == 2)
 			{
-				if(seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry")
+				if(seedKind == "producer-pro-bank")
+					requireProProducerBank(componentStateFromHost(saved), nativeComponent,
+						"Native Pro bank survives a fresh VST3 capture");
+				else if(seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry")
 					requireProProducerSound(componentStateFromHost(saved), nativeComponent,
 						seedKind == "producer-pro-dry", "Native Pro producer sound survives a fresh VST3 capture");
 				else if(seedKind == "pro-system")
@@ -580,9 +652,9 @@ namespace hostRecallTest
 					requireProPanelContext(componentStateFromHost(saved), nativeComponent,
 						"Native Pro Fine Tune menu survives a fresh VST3 capture");
 			}
-			if(expectedModel == 5)
+			if(expectedModel == 5 || expectedModel == 21)
 				requireAdditionalFamilySeed(componentStateFromHost(saved), nativeComponent,
-					expectedModel, seedKind, "Native SC-55mk1 sound edits survive VST3 capture");
+					expectedModel, seedKind, "Additional-family sound edits survive VST3 capture");
 		}
 		else
 		{
@@ -610,7 +682,7 @@ namespace hostRecallTest
 				static_cast<int>(immediateState.getSize()));
 			require(save(*immediateRestored) == immediateState,
 				"Immediate MIDI save restores before any fresh audio callback");
-			const auto immediateAudio = render(*immediateRestored, auditionNotes(), auditionBlocks);
+			const auto immediateAudio = render(*immediateRestored, auditionNotes(expectedModel), auditionBlocks);
 			auto immediateIdleInstance = create(manager, description);
 			immediateIdleInstance->setStateInformation(immediateState.getData(),
 				static_cast<int>(immediateState.getSize()));
@@ -642,7 +714,7 @@ namespace hostRecallTest
 		soundingSource->setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
 		auto quietSource = create(manager, description);
 		quietSource->setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
-		auto captureNote = auditionNotes();
+		auto captureNote = auditionNotes(expectedModel);
 		bool sourceNoteSounds = false;
 		for(int block = 0; block < auditionBlocks; ++block)
 		{
@@ -671,8 +743,8 @@ namespace hostRecallTest
 		const auto quietIdle = render(*quietReference, {}, auditionBlocks);
 		const auto activeIdle = render(*activeRestored, {}, auditionBlocks);
 		require(quietIdle == activeIdle, "Active-note history does not sound after reopen");
-		const auto quietNextNote = render(*quietReference, auditionNotes(), auditionBlocks);
-		const auto activeNextNote = render(*activeRestored, auditionNotes(), auditionBlocks);
+		const auto quietNextNote = render(*quietReference, auditionNotes(expectedModel), auditionBlocks);
+		const auto activeNextNote = render(*activeRestored, auditionNotes(expectedModel), auditionBlocks);
 		require(quietNextNote == activeNextNote,
 			"Active-note history leaves the immediate next note unchanged");
 		quietReference->releaseResources();
@@ -686,7 +758,10 @@ namespace hostRecallTest
 				expectedModel, seedKind, "Fresh VST3 instance restores the native SC-88 panel context");
 		if(nativeComponentPath.isNotEmpty() && expectedModel == 2)
 		{
-			if(seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry")
+			if(seedKind == "producer-pro-bank")
+				requireProProducerBank(componentStateFromHost(save(*restored)), nativeComponent,
+					"Fresh VST3 instance restores committed Pro bank and pending selectors");
+			else if(seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry")
 				requireProProducerSound(componentStateFromHost(save(*restored)), nativeComponent,
 					seedKind == "producer-pro-dry", "Fresh VST3 instance restores native Pro producer sound");
 			else if(seedKind == "pro-system")
@@ -696,14 +771,14 @@ namespace hostRecallTest
 				requireProPanelContext(componentStateFromHost(save(*restored)), nativeComponent,
 					"Fresh VST3 instance restores the native Pro Fine Tune menu context");
 		}
-		if(nativeComponentPath.isNotEmpty() && expectedModel == 5)
+		if(nativeComponentPath.isNotEmpty() && (expectedModel == 5 || expectedModel == 21))
 			requireAdditionalFamilySeed(componentStateFromHost(save(*restored)), nativeComponent,
-				expectedModel, seedKind, "Fresh VST3 instance restores native SC-55mk1 sound edits");
+				expectedModel, seedKind, "Fresh VST3 instance restores additional-family sound edits");
 		auto duplicate = create(manager, description);
 		duplicate->setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
 		require(save(*duplicate) == saved, "A second fresh instance restores the same state");
 
-		const auto notes = auditionNotes();
+		const auto notes = auditionNotes(expectedModel);
 		const auto firstAudio = render(*restored, notes, auditionBlocks);
 		const auto secondAudio = render(*duplicate, notes, auditionBlocks);
 		require(firstAudio == secondAudio, "Fresh restored instances produce identical audio");
@@ -718,11 +793,16 @@ namespace hostRecallTest
 		const auto defaultAudio = render(*defaults, notes, auditionBlocks);
 		require(firstAudio != defaultAudio, "Restored settings audibly differ from factory defaults");
 		if(seedKind == "producer-wet" || seedKind == "producer-dry" ||
-			seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry")
+			seedKind == "producer-pro-wet" || seedKind == "producer-pro-dry" ||
+			seedKind == "producer-mt32old-wet" || seedKind == "producer-mt32old-dry")
 		{
 			const auto otherKind = seedKind.replace("wet", "dry") == seedKind ?
 				seedKind.replace("dry", "wet") : seedKind.replace("wet", "dry");
-			const auto otherPath = nativeComponentPath.replace(seedKind, otherKind);
+			const auto otherPath = expectedModel == 21 ?
+				nativeComponentPath.replace(
+					String("mt32old-") + (seedKind.endsWith("dry") ? "dry" : "wet") + "-model-",
+					String("mt32old-") + (seedKind.endsWith("dry") ? "wet" : "dry") + "-model-") :
+				nativeComponentPath.replace(seedKind, otherKind);
 			MemoryBlock otherNative;
 			require(otherPath != nativeComponentPath && File(otherPath).loadFileAsData(otherNative),
 				"Read paired native wet/dry producer component");
@@ -735,7 +815,10 @@ namespace hostRecallTest
 			(void)render(*otherSource, {}, 1);
 			const auto otherState = save(*otherSource);
 			requireModel(otherState, expectedModel);
-			if(expectedModel == 2)
+			if(expectedModel == 21)
+				requireAdditionalFamilySeed(componentStateFromHost(otherState), otherNative,
+					expectedModel, otherKind, "Paired MT-32 sound survives VST3 capture");
+			else if(expectedModel == 2)
 				requireProProducerSound(componentStateFromHost(otherState), otherNative,
 					otherKind == "producer-pro-dry", "Paired Pro producer sound survives VST3 capture");
 			else
@@ -743,7 +826,19 @@ namespace hostRecallTest
 					expectedModel, otherKind, "Paired producer sound survives VST3 capture");
 			const auto thisComponent = componentStateFromHost(saved);
 			const auto otherComponent = componentStateFromHost(otherState);
-			if(expectedModel == 2)
+			if(expectedModel == 21)
+			{
+				const auto thisChunk = mt32HardwareChunk(thisComponent);
+				const auto otherChunk = mt32HardwareChunk(otherComponent);
+				const auto* thisMemory = static_cast<const uint8_t*>(thisChunk.getData()) + mt32ChunkMemoryOffset;
+				const auto* otherMemory = static_cast<const uint8_t*>(otherChunk.getData()) + mt32ChunkMemoryOffset;
+				require(std::memcmp(thisMemory, otherMemory, mt32ReverbLevelOffset) == 0 &&
+					std::memcmp(thisMemory + mt32ReverbLevelOffset + 1,
+						otherMemory + mt32ReverbLevelOffset + 1,
+						mt32ImageBytes - mt32ReverbLevelOffset - 1) == 0,
+					"Wet and dry MT-32 states retain identical patch, timbre and knob bytes");
+			}
+			else if(expectedModel == 2)
 			{
 				const auto descriptor = proProducerDescriptor(thisComponent);
 				require(proProducerDescriptor(otherComponent) == descriptor,
@@ -773,24 +868,29 @@ namespace hostRecallTest
 			thisSound->setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
 			auto otherSound = create(manager, description);
 			otherSound->setStateInformation(otherState.getData(), static_cast<int>(otherState.getSize()));
-			(void)render(*thisSound, auditionNotes(), auditionBlocks / 2);
-			(void)render(*otherSound, auditionNotes(), auditionBlocks / 2);
+			(void)render(*thisSound, auditionNotes(expectedModel), auditionBlocks / 2);
+			(void)render(*otherSound, auditionNotes(expectedModel), auditionBlocks / 2);
 			MidiBuffer noteOff;
-			noteOff.addEvent(MidiMessage::noteOff(1, 60), 0);
+			noteOff.addEvent(MidiMessage::noteOff(hostMidiChannel(expectedModel), 60), 0);
 			const auto thisTail = render(*thisSound, noteOff, auditionBlocks * 2);
 			const auto otherTail = render(*otherSound, noteOff, auditionBlocks * 2);
 			float maximumDelta{};
 			for(size_t sample{}; sample < thisTail.size(); ++sample)
 				maximumDelta = std::max(maximumDelta, std::abs(thisTail[sample] - otherTail[sample]));
 			Logger::writeToLog("Producer wet/dry post-note tail maximum delta=" + String(maximumDelta, 9));
-			require(maximumDelta > 0.f, "Native reverb send zero changes actual VST3 note-off tail");
+			require(maximumDelta > 0.f, expectedModel == 21 ?
+				"MT-32 system reverb level changes actual VST3 note-off tail" :
+				"Native reverb send zero changes actual VST3 note-off tail");
 			thisSound->releaseResources();
 			otherSound->releaseResources();
 			otherSource->releaseResources();
 		}
 		const auto beforeIndependentEdit = save(*duplicate);
 		MidiBuffer independentEdit;
-		independentEdit.addEvent(MidiMessage::controllerEvent(1, 7, 0), 0);
+		if(expectedModel == 21)
+			independentEdit.addEvent(MidiMessage::programChange(hostMidiChannel(expectedModel), 18), 0);
+		else
+			independentEdit.addEvent(MidiMessage::controllerEvent(hostMidiChannel(expectedModel), 7, 0), 0);
 		(void)render(*restored, independentEdit, settleBlocks);
 		const auto unchanged = save(*duplicate);
 		require(unchanged == beforeIndependentEdit, "Editing one instance leaves the other state unchanged");
