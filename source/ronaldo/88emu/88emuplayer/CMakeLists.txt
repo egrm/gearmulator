@@ -191,6 +191,14 @@ else()
 endif()
 endif() # Standalone application and CLI
 if(BUILD_TESTING)
+	add_executable(88emuProducerRecall_test tests/Emu88ProducerRecall_test.cpp)
+	target_link_libraries(88emuProducerRecall_test PRIVATE 88emuplayer 88emuplayer_BinaryData 88lib
+		jucePlayerLib juceRmlUi juceUiLib jucePluginData juce_plugin_modules)
+	add_test(NAME 88emuProducerRecall COMMAND 88emuProducerRecall_test)
+	set_tests_properties(88emuProducerRecall PROPERTIES
+		ENVIRONMENT "TUS_DATA_FOLDER=${CMAKE_CURRENT_BINARY_DIR}/producer-recall-test-data"
+		SKIP_RETURN_CODE 77)
+	set_property(TARGET 88emuProducerRecall_test PROPERTY FOLDER "Ronaldo/tests")
 	add_executable(88emuProSystemRecall_test tests/Emu88ProSystemRecall_test.cpp)
 	target_link_libraries(88emuProSystemRecall_test PRIVATE 88emuplayer 88emuplayer_BinaryData 88lib
 		jucePlayerLib juceRmlUi juceUiLib jucePluginData juce_plugin_modules)
@@ -239,7 +247,7 @@ if(BUILD_TESTING)
 		# One dependency graph builds shared player code once for the host and
 		# processor acceptance executables, instead of separate target invocations.
 		add_custom_target(88emuRecall_build DEPENDS 88emuplayer_VST3 pluginTester
-			88emuRecall_test 88emuPowerRecall_test 88emuProSystemRecall_test)
+			88emuRecall_test 88emuPowerRecall_test 88emuProSystemRecall_test 88emuProducerRecall_test)
 	endif()
 endif()
 

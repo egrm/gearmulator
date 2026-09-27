@@ -248,7 +248,28 @@ namespace hostRecallTest
 	inline void requireSc88NativeSeed(const MemoryBlock& actual, const MemoryBlock& seed,
 		int model, const String& seedKind, const char* description)
 	{
-		if(seedKind == "eq") requireSc88EqContext(actual, seed, model, description);
+		if(seedKind == "producer-wet" || seedKind == "producer-dry")
+		{
+			// docs/research/88emu-userinst-panel-procedure.md: selected
+			// secondary envelope offsets A/B/C, primary program and CC91 send.
+			const auto part = sc88SelectedPart(seed, model);
+			require(sc88SelectedPart(actual, model) == part,
+				"VST3 retains the producer's selected internal part");
+			const auto primary = (part < sc88PartsPerGroup ? sc88FirstGroupBase : sc88SecondGroupBase) +
+				(part % sc88PartsPerGroup) * sc88PartRecordBytes;
+			const auto secondary = (part < sc88PartsPerGroup ? size_t{0x87c8} : size_t{0x9cc8}) +
+				(part % sc88PartsPerGroup) * size_t{0x20};
+			require(sc88HardwareByte(seed, primary + 1) != 0,
+				"Native producer seed has a nondefault selected program");
+			const auto send = sc88HardwareByte(seed, primary + 0x0f);
+			require(seedKind == "producer-dry" ? send == 0 : send != 0,
+				"Native producer seed has the requested dry or wet reverb send");
+			for(const auto address : {primary + 1, primary + 0x0f,
+				secondary + 0x0a, secondary + 0x0b, secondary + 0x0c})
+				require(sc88HardwareByte(actual, address) == sc88HardwareByte(seed, address),
+					description);
+		}
+		else if(seedKind == "eq") requireSc88EqContext(actual, seed, model, description);
 		else if(seedKind == "all") requireSc88AllContext(actual, seed, model, description);
 		else if(seedKind == "eq-frequency") requireSc88FrequencyContext(actual, seed, model, description);
 		else requireSc88PanelLevel(actual, seed, model, description);
