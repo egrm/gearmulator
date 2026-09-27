@@ -508,6 +508,264 @@ bool exercise(Model model, bool isolateHistory)
 
     if(!isolateHistory)
     {
+        // CC0/CC32 handlers SC 00:3172/317C and VL 00:3243/324D
+        // retain pending bank bytes at D860/D820 + doubled internal part.
+        // They accept values only when the part record's +18 receive bits
+        // 0/1 permit them. Establish that native precondition before edits.
+        constexpr size_t bankMsbBase=0xd860, bankLsbBase=0xd820;
+        const auto partPointers=model==Model::Sc88?size_t{0xdf70}:size_t{0xdf72};
+        const auto readWord=[](const std::vector<uint8_t>& bytes,size_t address)
+        { return static_cast<uint16_t>((uint16_t{bytes.at(address)}<<8)|bytes.at(address+1)); };
+        auto bankSource=live->cloneExecution();
+        if(!bankSource) throw std::runtime_error("bank source clone failed");
+        const auto bankBefore=Sc88ExecutionProbe::ram(*bankSource);
+        size_t closedBankGates{};
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto record=readWord(bankBefore,partPointers+2*part);
+            closedBankGates+=(bankBefore.at(record+0x18)&0x03)!=0;
+        }
+        std::cout << "native-bank closed-receive-gates=" << closedBankGates << '\n';
+        check(closedBankGates==0,"native bank receive gates are open on all parts");
+        for(size_t channelSlot{};channelSlot<g_partCount;++channelSlot)
+        {
+            const auto port=static_cast<uint8_t>(channelSlot/g_groupSize);
+            const auto channel=static_cast<uint8_t>(channelSlot%g_groupSize);
+            const auto status=static_cast<uint8_t>(0xb0|channel);
+            send(*bankSource,port,status,0,static_cast<uint8_t>(channelSlot+1));
+            send(*bankSource,port,status,32,static_cast<uint8_t>(channelSlot+33));
+        }
+        run(*bankSource,g_drainSamples);
+        std::vector<uint8_t> bankImage;
+        check(Sc88Settings::capture(*bankSource,bankImage)==Result::Success,
+              "capture native pending banks");
+        if(bankImage.size()!=Sc88::SramSize)
+            throw std::runtime_error("native pending bank image has invalid size");
+        std::array<uint8_t,g_partCount> acceptedMsb{},acceptedLsb{};
+        size_t changedMsb{},changedLsb{};
+        for(size_t part{};part<g_partCount;++part)
+        {
+            acceptedMsb[part]=bankImage[bankMsbBase+2*part];
+            acceptedLsb[part]=bankImage[bankLsbBase+2*part];
+            changedMsb+=acceptedMsb[part]!=bankBefore[bankMsbBase+2*part];
+            changedLsb+=acceptedLsb[part]!=bankBefore[bankLsbBase+2*part];
+        }
+        std::sort(acceptedMsb.begin(),acceptedMsb.end());
+        std::sort(acceptedLsb.begin(),acceptedLsb.end());
+        size_t nativeBankMismatches{};
+        for(size_t part{};part<g_partCount;++part)
+            nativeBankMismatches+=(acceptedMsb[part]!=part+1)+
+                                  (acceptedLsb[part]!=part+33);
+        std::cout << "native-bank changed-msb=" << changedMsb
+                  << " changed-lsb=" << changedLsb
+                  << " value-mismatches=" << nativeBankMismatches << '\n';
+        check(changedMsb==g_partCount && changedLsb==g_partCount &&
+              nativeBankMismatches==0,
+              "all 32 native pending bank values accepted");
+        for(uint8_t preference:{uint8_t{0},uint8_t{1}})
+        {
+            currentPreference=preference;
+            auto variant=bankImage;
+            variant[g_preference]=preference; // Diagnostic saved preference variant.
+            auto restoredBank=std::make_unique<Sc88>(rom,waves,model,false);
+            const auto bankRestoreResult=Sc88Settings::restore(*restoredBank,variant);
+            check(bankRestoreResult==Result::Success,"restore native pending banks");
+            if(bankRestoreResult!=Result::Success) continue;
+            const auto& restoredBefore=Sc88ExecutionProbe::ram(*restoredBank);
+            size_t pendingMismatches{};
+            for(size_t part{};part<g_partCount;++part)
+                pendingMismatches+=(restoredBefore[bankMsbBase+2*part]!=
+                                    bankImage[bankMsbBase+2*part])+
+                                   (restoredBefore[bankLsbBase+2*part]!=
+                                    bankImage[bankLsbBase+2*part]);
+            check(pendingMismatches==0,"pending bank values survive fresh restore");
+            auto continuedSource=bankSource->cloneExecution();
+            if(!continuedSource) throw std::runtime_error("bank continuation clone failed");
+            std::array<uint16_t,g_partCount> sourceProgramsBefore{};
+            std::array<uint8_t,g_partCount> sourceRhythmFlags{},sourceKitBefore{};
+            constexpr size_t rhythmPointers=0xd9e0; // SC 2D1A, VL 2ED2.
+            constexpr size_t kitProgramOffset=0x592; // SC 2F06, VL 306B.
+            for(size_t part{};part<g_partCount;++part)
+            {
+                const auto record=readWord(Sc88ExecutionProbe::ram(*continuedSource),
+                                           partPointers+2*part);
+                sourceProgramsBefore[part]=readWord(Sc88ExecutionProbe::ram(*continuedSource),record);
+                // PC dispatch branches on part+05 bit4 into the drum-kit
+                // selector, which does not use the melodic primary word.
+                sourceRhythmFlags[part]=Sc88ExecutionProbe::ram(*continuedSource)[record+5]&0x10;
+                if(sourceRhythmFlags[part])
+                {
+                    const auto kitBase=readWord(Sc88ExecutionProbe::ram(*continuedSource),
+                                                rhythmPointers+2*part);
+                    sourceKitBefore[part]=Sc88ExecutionProbe::ram(*continuedSource)
+                                           .at(kitBase+kitProgramOffset);
+                }
+            }
+            for(size_t channelSlot{};channelSlot<g_partCount;++channelSlot)
+            {
+                const auto port=static_cast<uint8_t>(channelSlot/g_groupSize);
+                const auto status=static_cast<uint8_t>(0xc0|(channelSlot%g_groupSize));
+                const auto program=static_cast<uint8_t>(80+channelSlot);
+                send(*continuedSource,port,status,program);
+                send(*restoredBank,port,status,program);
+            }
+            run(*continuedSource,g_drainSamples);
+            run(*restoredBank,g_drainSamples);
+            const auto& nativeAfter=Sc88ExecutionProbe::ram(*continuedSource);
+            const auto& restoredAfter=Sc88ExecutionProbe::ram(*restoredBank);
+            size_t nativeProgramChanges{},rhythmParts{},invalidRhythmRetentions{},
+                   programMismatches{},bankAfterMismatches{},partSettingMismatches{},
+                   rhythmStateMismatches{};
+            for(size_t part{};part<g_partCount;++part)
+            {
+                const auto nativeRecord=readWord(nativeAfter,partPointers+2*part);
+                const auto restoredRecord=readWord(restoredAfter,partPointers+2*part);
+                const auto nativeProgram=readWord(nativeAfter,nativeRecord);
+                if(sourceRhythmFlags[part])
+                {
+                    ++rhythmParts;
+                    const auto nativeKit=readWord(nativeAfter,rhythmPointers+2*part);
+                    const auto restoredKit=readWord(restoredAfter,rhythmPointers+2*part);
+                    const bool nativeRetained=nativeProgram==sourceProgramsBefore[part] &&
+                        nativeAfter.at(nativeKit+kitProgramOffset)==sourceKitBefore[part] &&
+                        nativeAfter.at(nativeKit+0x590)==bankImage.at(nativeKit+0x590) &&
+                        nativeAfter.at(nativeKit+0x591)==bankImage.at(nativeKit+0x591);
+                    invalidRhythmRetentions+=nativeRetained;
+                    for(const size_t offset:{size_t{0x590},size_t{0x591},kitProgramOffset})
+                        rhythmStateMismatches+=nativeAfter.at(nativeKit+offset)!=
+                                               restoredAfter.at(restoredKit+offset);
+                    std::cout << "native-bank-rhythm internal-part=" << part
+                              << " retained=" << nativeRetained
+                              << " pending-lsb=" << unsigned(nativeAfter[bankLsbBase+2*part])
+                              << " kit-program=" << unsigned(nativeAfter[nativeKit+kitProgramOffset])
+                              << '\n';
+                }
+                else
+                    nativeProgramChanges+=nativeProgram!=sourceProgramsBefore[part];
+                programMismatches+=nativeProgram!=readWord(restoredAfter,restoredRecord);
+                // Native CC7/CC10 handlers SC 31AB/31B4 and VL 327C/3285
+                // use these established mapped part-record settings.
+                partSettingMismatches+=(nativeAfter[nativeRecord+8]!=
+                                        restoredAfter[restoredRecord+8])+
+                                       (nativeAfter[nativeRecord+9]!=
+                                        restoredAfter[restoredRecord+9]);
+                bankAfterMismatches+=(nativeAfter[bankMsbBase+2*part]!=
+                                      restoredAfter[bankMsbBase+2*part])+
+                                     (nativeAfter[bankLsbBase+2*part]!=
+                                      restoredAfter[bankLsbBase+2*part]);
+            }
+            std::cout << "native-bank-continuation C072=" << unsigned(preference)
+                      << " changed-melodic-programs=" << nativeProgramChanges
+                      << " rhythm-parts=" << rhythmParts
+                      << " retained-invalid-rhythm=" << invalidRhythmRetentions
+                      << " program-mismatches=" << programMismatches
+                      << " rhythm-state-mismatches=" << rhythmStateMismatches
+                      << " pending-bank-mismatches=" << bankAfterMismatches
+                      << " level-pan-mismatches=" << partSettingMismatches << '\n';
+            check(rhythmParts==2 && nativeProgramChanges==g_partCount-rhythmParts &&
+                  invalidRhythmRetentions==rhythmParts,
+                  "native melodic programs change and invalid rhythm selections retain kits");
+            check(programMismatches==0 && bankAfterMismatches==0 &&
+                  rhythmStateMismatches==0 && partSettingMismatches==0 &&
+                  nativeAfter[g_volume]==restoredAfter[g_volume],
+                  "restored pending-bank Program Change matches native source");
+            // Both ROM kit maps at 02:FD00 mark 8 and 16 as valid. The
+            // previous distinct pending LSBs rejected the drum request;
+            // native bank 0 plus a valid kit must reach the actual drum
+            // program field at rhythmPointer+592 on each affected part.
+            for(size_t part{};part<g_partCount;++part)
+            {
+                if(!sourceRhythmFlags[part]) continue;
+                const auto slot=static_cast<size_t>(bankImage[bankMsbBase+2*part]-1);
+                check(slot<g_partCount,"native bank edit identifies a drum MIDI channel");
+                if(slot>=g_partCount) continue;
+                const auto port=static_cast<uint8_t>(slot/g_groupSize);
+                const auto cc=static_cast<uint8_t>(0xb0|(slot%g_groupSize));
+                for(auto* board:{continuedSource.get(),restoredBank.get()})
+                {
+                    send(*board,port,cc,0,0);
+                    send(*board,port,cc,32,0);
+                }
+            }
+            run(*continuedSource,g_drainSamples);
+            run(*restoredBank,g_drainSamples);
+            size_t acceptedDrumBanks{};
+            for(size_t part{};part<g_partCount;++part)
+                if(sourceRhythmFlags[part])
+                    acceptedDrumBanks+=(Sc88ExecutionProbe::ram(*continuedSource)
+                                        [bankMsbBase+2*part]==0 &&
+                                        Sc88ExecutionProbe::ram(*restoredBank)
+                                        [bankMsbBase+2*part]==0 &&
+                                        Sc88ExecutionProbe::ram(*continuedSource)
+                                        [bankLsbBase+2*part]==0 &&
+                                        Sc88ExecutionProbe::ram(*restoredBank)
+                                        [bankLsbBase+2*part]==0);
+            check(acceptedDrumBanks==rhythmParts,"native bank 0 accepted for both drum parts");
+            for(size_t part{};part<g_partCount;++part)
+            {
+                if(!sourceRhythmFlags[part]) continue;
+                const auto slot=static_cast<size_t>(bankImage[bankMsbBase+2*part]-1);
+                if(slot>=g_partCount) continue;
+                const auto port=static_cast<uint8_t>(slot/g_groupSize);
+                const auto status=static_cast<uint8_t>(0xc0|(slot%g_groupSize));
+                const auto validKit=static_cast<uint8_t>(sourceKitBefore[part]==8?16:8);
+                send(*continuedSource,port,status,validKit);
+                send(*restoredBank,port,status,validKit);
+            }
+            run(*continuedSource,g_drainSamples);
+            run(*restoredBank,g_drainSamples);
+            const auto& nativeDrum=Sc88ExecutionProbe::ram(*continuedSource);
+            const auto& restoredDrum=Sc88ExecutionProbe::ram(*restoredBank);
+            size_t validDrumChanges{},drumFieldMismatches{};
+            for(size_t part{};part<g_partCount;++part)
+            {
+                if(!sourceRhythmFlags[part]) continue;
+                const auto nativeKit=readWord(nativeDrum,rhythmPointers+2*part);
+                const auto restoredKit=readWord(restoredDrum,rhythmPointers+2*part);
+                const auto validKit=static_cast<uint8_t>(sourceKitBefore[part]==8?16:8);
+                validDrumChanges+=nativeDrum.at(nativeKit+kitProgramOffset)==validKit &&
+                                  nativeDrum.at(nativeKit+kitProgramOffset)!=sourceKitBefore[part];
+                for(const size_t offset:{size_t{0x590},size_t{0x591},kitProgramOffset,
+                                         size_t{0x58d},size_t{0x58e},size_t{0x58f}})
+                    drumFieldMismatches+=nativeDrum.at(nativeKit+offset)!=
+                                         restoredDrum.at(restoredKit+offset);
+            }
+            std::cout << "native-bank-valid-drum C072=" << unsigned(preference)
+                      << " changed-kits=" << validDrumChanges
+                      << " field-mismatches=" << drumFieldMismatches << '\n';
+            check(validDrumChanges==rhythmParts && drumFieldMismatches==0,
+                  "valid native drum programs change and match restored continuation");
+            std::vector<uint8_t> selectedKitImage;
+            check(Sc88Settings::capture(*continuedSource,selectedKitImage)==Result::Success,
+                  "capture native selected drum kits");
+            if(selectedKitImage.size()!=Sc88::SramSize)
+                throw std::runtime_error("native selected drum kit image has invalid size");
+            selectedKitImage[g_preference]=preference;
+            auto reopenedKit=std::make_unique<Sc88>(rom,waves,model,false);
+            const auto kitRestoreResult=Sc88Settings::restore(*reopenedKit,selectedKitImage);
+            check(kitRestoreResult==Result::Success,"reopen native selected drum kits");
+            if(kitRestoreResult==Result::Success)
+            {
+                const auto& reopenedRam=Sc88ExecutionProbe::ram(*reopenedKit);
+                size_t reopenedKitMismatches{};
+                for(size_t part{};part<g_partCount;++part)
+                {
+                    if(!sourceRhythmFlags[part]) continue;
+                    const auto nativeKit=readWord(nativeDrum,rhythmPointers+2*part);
+                    const auto reopenedBase=readWord(reopenedRam,rhythmPointers+2*part);
+                    reopenedKitMismatches+=nativeKit!=reopenedBase;
+                    for(const size_t offset:{size_t{0x590},size_t{0x591},kitProgramOffset,
+                                             size_t{0x58d},size_t{0x58e},size_t{0x58f}})
+                        reopenedKitMismatches+=nativeDrum.at(nativeKit+offset)!=
+                                               reopenedRam.at(reopenedBase+offset);
+                }
+                std::cout << "native-bank-reopen-drum C072=" << unsigned(preference)
+                          << " kit-mismatches=" << reopenedKitMismatches << '\n';
+                check(reopenedKitMismatches==0,
+                      "fresh reopen retains native selected drum kit fields");
+            }
+        }
+        currentPreference=0xff;
         // SC 30C4/3585 and VL 3195/3663 address 128 pressure bytes per
         // internal part at C660. Native input, not synthetic SRAM, sets them.
         constexpr size_t pressureBase=0xc660;
