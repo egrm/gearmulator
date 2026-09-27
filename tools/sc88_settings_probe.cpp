@@ -266,7 +266,106 @@ bool inspectVariant(const std::vector<uint8_t>& rom, const std::vector<uint8_t>&
            stableRam[g_batteryPreference] == source[g_batteryPreference];
 }
 
-bool exercise(Model model, bool idleTrace)
+// Research predicate only. Independently decoded dispatcher PCs, task wait
+// records and matrix queues are archived in the parent research report.
+// A successful fixture does not establish every menu/held-key capture case.
+bool panelCandidate(const Sc88& board, Model model)
+{
+    constexpr std::array<uint32_t,3> scIdle{0x6b7,0x6bb,0x6be};
+    constexpr std::array<uint32_t,3> vlIdle{0x733,0x737,0x73a};
+    const auto& idle=model==Model::Sc88?scIdle:vlIdle;
+    const auto& ram=Sc88ExecutionProbe::ram(board);
+    if(std::find(idle.begin(),idle.end(),Sc88ExecutionProbe::pc(board))==idle.end() ||
+       !Sc88ExecutionProbe::midiIdle(board) || board.buttons()!=0) return false;
+    // Scanner waits on bit1 at 01:A211 / 01:95CE; UI waits on mask9 at
+    // 01:C065 / 01:B45C. Kernel wait record sets the sleep flag in bit7.
+    if(ram[0x75c0]!=0x81 || (ram[0x75c1]&1) ||
+       ram[0x75d0]!=0x89 || (ram[0x75d1]&9)) return false;
+    if(ram[0x5000]!=ram[0x5002] || ram[0x5001]!=ram[0x5003]) return false;
+    for(size_t column{};column<sizeof(uint32_t);++column)
+        if(ram[0x5004+column]!=0xff || ram[0x5008+column]!=0xff) return false;
+    // SC deferred press handler 01:A4CA and scanner 01:A4DC; VL scanner
+    // 01:97CE independently tests the same bit before emitting queued keys.
+    for(size_t key{};key<32;++key) if(ram[0x5030+key]&1) return false;
+    return true;
+}
+
+void tracePanelCandidate(Sc88& board, Model model)
+{
+    const auto wait=[&](const char* phase)
+    {
+        for(unsigned elapsed{};elapsed<g_sampleRate;++elapsed)
+        {
+            if(panelCandidate(board,model))
+            {
+                const auto& ram=Sc88ExecutionProbe::ram(board);
+                std::cout << "panel-candidate model=" << static_cast<int>(model)
+                          << " phase=" << phase << " samples=" << elapsed
+                          << " level=" << unsigned(ram[0x8088+g_partLevelOffset])
+                          << " kernel-75AE=" << unsigned(ram[0x75ae])
+                          << ',' << unsigned(ram[0x75af]) << '\n';
+                return;
+            }
+            board.renderSample();
+        }
+        throw std::runtime_error("panel candidate did not settle within diagnostic interval");
+    };
+    wait("initial");
+    const auto before=Sc88ExecutionProbe::ram(board);
+    board.setButton(Button::LevelR,true);
+    require(!panelCandidate(board,model),"candidate accepted unscanned key press");
+    // Same native press duration used by the existing board reset gesture.
+    run(board,g_sampleRate/10);
+    board.setButtons(0);
+    wait("released-edit");
+    const auto edited=Sc88ExecutionProbe::ram(board);
+    size_t changedLevels{};
+    for(size_t part{};part<g_partCount;++part)
+    {
+        const auto base=(part<g_groupPartCount?0x8088:0x9588)+
+                        (part%g_groupPartCount)*g_partRecordBytes;
+        if(before[base+g_partLevelOffset]==edited[base+g_partLevelOffset]) continue;
+        ++changedLevels;
+        std::cout << "panel-level part=" << part << " before="
+                  << unsigned(before[base+g_partLevelOffset]) << " after="
+                  << unsigned(edited[base+g_partLevelOffset]) << '\n';
+    }
+    require(changedLevels!=0,"panel gesture changed no part levels");
+    run(board,g_sampleRate);
+    for(size_t part{};part<g_partCount;++part)
+    {
+        const auto base=(part<g_groupPartCount?0x8088:0x9588)+
+                        (part%g_groupPartCount)*g_partRecordBytes;
+        require(Sc88ExecutionProbe::ram(board)[base+g_partLevelOffset]==edited[base+g_partLevelOffset],
+                "candidate preceded a delayed level edit");
+    }
+    synthLib::SMidiEvent volume(synthLib::MidiEventSource::Host);
+    volume.a=0xb0; volume.b=7; volume.c=63;
+    board.addMidiEvent(volume);
+    require(!panelCandidate(board,model),"candidate accepted pending MIDI");
+    wait("immediate-midi");
+    const auto midiCandidate=Sc88ExecutionProbe::ram(board);
+    run(board,g_sampleRate);
+    size_t midiChanges{};
+    for(size_t part{};part<g_partCount;++part)
+    {
+        const auto base=(part<g_groupPartCount?0x8088:0x9588)+
+                        (part%g_groupPartCount)*g_partRecordBytes;
+        const auto address=base+g_partLevelOffset;
+        if(Sc88ExecutionProbe::ram(board)[address]!=edited[address])
+        {
+            ++midiChanges;
+            std::cout << "midi-level part=" << part << " candidate="
+                      << unsigned(midiCandidate[address]) << " settled="
+                      << unsigned(Sc88ExecutionProbe::ram(board)[address]) << '\n';
+        }
+        require(midiCandidate[address]==Sc88ExecutionProbe::ram(board)[address],
+                "candidate preceded the accepted MIDI edit");
+    }
+    require(midiChanges!=0,"MIDI edit changed no part levels");
+}
+
+bool exercise(Model model, std::string_view mode)
 {
     auto romAsset = RomLoader::findROM(model);
     auto wavesAsset = RomLoader::findWaveRom();
@@ -282,7 +381,12 @@ bool exercise(Model model, bool idleTrace)
     auto rom = romAsset.takeData();
     auto live = std::make_unique<Sc88>(rom, waves, model);
     run(*live, g_bootSamples);
-    if(idleTrace)
+    if(mode=="--panel-boundary")
+    {
+        tracePanelCandidate(*live,model);
+        return true;
+    }
+    if(mode=="--idle-pc")
     {
         std::map<uint32_t,size_t> frequency;
         for(unsigned sample{};sample<g_sampleRate;++sample)
@@ -327,14 +431,15 @@ bool exercise(Model model, bool idleTrace)
 int main(int argc, char** argv)
 {
     baseLib::disableErrorDialogs();
-    if(argc != 2 && (argc != 3 || std::string_view(argv[2]) != "--idle-pc")) return 77;
-    const bool idleTrace = argc == 3;
+    if(argc<2 || argc>3) return 77;
+    const std::string_view mode=argc==3?argv[2]:"";
+    if(!mode.empty() && mode!="--idle-pc" && mode!="--panel-boundary") return 77;
     synthLib::RomLoader::setSearchPath(argv[1]);
     try
     {
         bool passed = true;
-        for(const auto model : {Model::Sc88, Model::Sc88VL}) passed &= exercise(model,idleTrace);
-        std::cout << (idleTrace ? "SC-88/VL idle-PC diagnostic " : "SC-88/VL boot-preservation diagnostic ")
+        for(const auto model : {Model::Sc88, Model::Sc88VL}) passed &= exercise(model,mode);
+        std::cout << "SC-88/VL diagnostic " << mode << ' '
                   << (passed ? "completed; inspect differences" : "gate/preference check failed") << '\n';
         return passed ? 0 : 1;
     }
