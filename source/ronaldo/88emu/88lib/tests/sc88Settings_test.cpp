@@ -641,7 +641,7 @@ bool exercise(Model model, bool isolateHistory)
         std::cout << "RPN-tuning next-data-entry-mismatches=" << continuationMismatch << '\n';
         check(continuationMismatch==0,"next native RPN data entry preserves selector and saved LSB");
 
-        // NRPN MSB 01, low selectors 08/20/63: SC 32A9..32ED and
+        // NRPN MSB 01, vibrato/filter/envelope selectors: SC 32A9..32ED and
         // VL 3380..33C4 dispatch data entry through the native per-part R2.
         auto nrpnSource=live->cloneExecution();
         if(!nrpnSource) throw std::runtime_error("NRPN source clone failed");
@@ -668,10 +668,15 @@ bool exercise(Model model, bool isolateHistory)
             check((Sc88ExecutionProbe::ram(*nrpnSource)[base+2]&0x80)!=0,
                   "native DT1 enables NRPN receive on every part");
         }
-        constexpr std::array<std::pair<uint8_t,uint8_t>,3> nrpnEdits{{
+        constexpr std::array<std::pair<uint8_t,uint8_t>,8> nrpnEdits{{
             {0x08,73}, // Native vibrato field: part +10.
+            {0x09,74}, // SC3365 / VL3443: part +11.
+            {0x0a,75}, // SC3369 / VL3447: part +17.
             {0x20,81}, // Native filter field: part +12.
-            {0x63,90}  // Native envelope field: part +14.
+            {0x21,82}, // SC3371 / VL344F: part +13.
+            {0x63,90}, // Native envelope field: part +14.
+            {0x64,91}, // SC3379 / VL3457: part +15.
+            {0x66,92}  // SC337D / VL345B: part +16.
         }};
         for(size_t part{};part<g_partCount;++part)
         {
@@ -700,7 +705,7 @@ bool exercise(Model model, bool isolateHistory)
             const auto base=(part<g_groupSize?size_t{0x8088}:size_t{0x9588})+
                             (part%g_groupSize)*0x70;
             const std::array<std::pair<size_t,uint8_t>,3> selectors{{
-                {0xd920+stride,1},{0xd921+stride,0x63},{0xd861+stride,0}}};
+                {0xd920+stride,1},{0xd921+stride,0x66},{0xd861+stride,0}}};
             for(const auto [address,expected]:selectors)
             {
                 if(nrpnImage.at(address)!=expected && nrpnNativeMismatch<10)
@@ -710,8 +715,9 @@ bool exercise(Model model, bool isolateHistory)
                 nrpnNativeMismatch += nrpnImage.at(address)!=expected;
                 nrpnLost += Sc88ExecutionProbe::ram(*nrpnRestored)[address]!=nrpnImage.at(address);
             }
-            for(const auto [offset,expected]:std::array<std::pair<size_t,uint8_t>,3>{{
-                    {0x10,73},{0x12,81},{0x14,90}}})
+            for(const auto [offset,expected]:std::array<std::pair<size_t,uint8_t>,8>{{
+                    {0x10,73},{0x11,74},{0x17,75},{0x12,81},
+                    {0x13,82},{0x14,90},{0x15,91},{0x16,92}}})
             {
                 if(nrpnImage.at(base+offset)!=expected && nrpnNativeMismatch<10)
                     std::cout << "NRPN-native-field part=" << part << " address=" << std::hex
@@ -730,7 +736,7 @@ bool exercise(Model model, bool isolateHistory)
         for(size_t part{};part<g_partCount;++part)
             for(auto* board:{nrpnSource.get(),nrpnRestored.get()})
                 send(*board,static_cast<uint8_t>(part/g_groupSize),
-                     static_cast<uint8_t>(0xb0 | (part%g_groupSize)),6,91);
+                     static_cast<uint8_t>(0xb0 | (part%g_groupSize)),6,93);
         run(*nrpnSource,g_drainSamples);
         run(*nrpnRestored,g_drainSamples);
         size_t nrpnContinuationMismatch{};
@@ -739,7 +745,7 @@ bool exercise(Model model, bool isolateHistory)
             {
                 const auto& ram=Sc88ExecutionProbe::ram(*board);
                 nrpnContinuationMismatch += ram[0xd920+2*part]!=1 ||
-                                            ram[0xd921+2*part]!=0x63 ||
+                                            ram[0xd921+2*part]!=0x66 ||
                                             ram[0xd861+2*part]!=0;
             }
         for(size_t part{};part<g_partCount;++part)
@@ -747,7 +753,7 @@ bool exercise(Model model, bool isolateHistory)
             const auto base=(part<g_groupSize?size_t{0x8088}:size_t{0x9588})+
                             (part%g_groupSize)*0x70;
             for(const auto* board:{nrpnSource.get(),nrpnRestored.get()})
-                nrpnContinuationMismatch += Sc88ExecutionProbe::ram(*board)[base+0x14]!=91;
+                nrpnContinuationMismatch += Sc88ExecutionProbe::ram(*board)[base+0x16]!=93;
         }
         std::cout << "NRPN-tone next-data-entry-mismatches=" << nrpnContinuationMismatch << '\n';
         check(nrpnContinuationMismatch==0,
