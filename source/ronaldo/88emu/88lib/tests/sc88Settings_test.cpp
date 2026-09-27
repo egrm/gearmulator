@@ -148,6 +148,27 @@ bool comparePcm(const std::vector<Sc88::SampleFrame>& left,
     return differing==0;
 }
 
+void reportRamDifferences(const std::vector<uint8_t>& before,
+                          const std::vector<uint8_t>& after, const char* phase)
+{
+    if(before.size()!=after.size()) throw std::runtime_error("RAM image sizes differ");
+    size_t differences{};
+    std::cout << phase << " changed-offsets=";
+    for(size_t address{};address<before.size();++address)
+    {
+        if(before[address]==after[address]) continue;
+        ++differences;
+    }
+    std::cout << differences << " work-and-high-SRAM=";
+    for(size_t address=0x4000;address<before.size();++address)
+    {
+        if(before[address]==after[address]) continue;
+        std::cout << std::hex << address << ':' << unsigned(before[address])
+                  << '>' << unsigned(after[address]) << ' ' << std::dec;
+    }
+    std::cout << '\n';
+}
+
 bool exercise(Model model)
 {
     using Result = Sc88Settings::Result;
@@ -261,6 +282,108 @@ bool exercise(Model model)
               "reject second restore on live board");
         check(restored->cycles()==cycleAfter,"rejected second restore leaves board unchanged");
     }
+    // An execution-state image captured while two ports sound must restore
+    // settings on a fresh board without resurrecting prior XP voices.
+    // Compare against a separate settings image taken just before the notes;
+    // both restored boards then have the same native boot sample count.
+    currentPreference = image[g_preference];
+    auto noSourceNote=live->cloneExecution();
+    auto aOnly=live->cloneExecution();
+    if(!noSourceNote || !aOnly) throw std::runtime_error("active-note source reference clone failed");
+    send(*live,0,0x90,60,100);
+    send(*live,1,0x90,67,100);
+    send(*aOnly,0,0x90,60,100);
+    std::vector<Sc88::SampleFrame> sourceActive, sourceSilent, sourceAOnly;
+    for(size_t sample{};sample<g_sampleRate/4;++sample)
+    {
+        sourceActive.push_back(live->renderSample());
+        sourceSilent.push_back(noSourceNote->renderSample());
+        sourceAOnly.push_back(aOnly->renderSample());
+    }
+    check(!comparePcm(sourceActive,sourceSilent,"source A/B notes vs no-note"),
+          "source notes change PCM from no-note continuation");
+    check(!comparePcm(sourceActive,sourceAOnly,"source A/B notes vs A-only"),
+          "source B-port note changes PCM beyond A-only continuation");
+    std::vector<uint8_t> alignedSilentImage, activeImage;
+    check(Sc88Settings::capture(*noSourceNote,alignedSilentImage)==Result::Success,
+          "capture no-note source at active-image sample boundary");
+    check(Sc88Settings::capture(*live,activeImage)==Result::Success,
+          "capture while A/B notes sound at completed sample");
+    if(activeImage.size()!=Sc88::SramSize || alignedSilentImage.size()!=Sc88::SramSize)
+        throw std::runtime_error("aligned capture size invalid");
+    check(Sc88ExecutionProbe::samples(*noSourceNote)==Sc88ExecutionProbe::samples(*live),
+          "active and no-note source sample boundaries align");
+    reportRamDifferences(alignedSilentImage,activeImage,"aligned no-note to active image");
+    auto preNoteRestored=std::make_unique<Sc88>(rom,waves,model,false);
+    auto activeRestored=std::make_unique<Sc88>(rom,waves,model,false);
+    check(Sc88Settings::restore(*preNoteRestored,alignedSilentImage)==Result::Success,
+          "restore aligned no-note settings reference");
+    check(Sc88Settings::restore(*activeRestored,activeImage)==Result::Success,
+          "restore active-note settings image");
+    check(Sc88ExecutionProbe::samples(*preNoteRestored)==Sc88ExecutionProbe::samples(*activeRestored),
+          "pre-note and active-image restore timelines align");
+    reportRamDifferences(Sc88ExecutionProbe::ram(*preNoteRestored),
+                         Sc88ExecutionProbe::ram(*activeRestored),
+                         "fresh restored pre-note to active RAM");
+    auto immediatePre=preNoteRestored->cloneExecution();
+    auto immediateActive=activeRestored->cloneExecution();
+    if(!immediatePre || !immediateActive)
+        throw std::runtime_error("immediate-note restored reference clone failed");
+    auto immediateSilent=immediatePre->cloneExecution();
+    if(!immediateSilent) throw std::runtime_error("immediate no-note clone failed");
+    std::vector<Sc88::SampleFrame> preIdle, activeIdle;
+    for(size_t sample{};sample<g_sampleRate;++sample)
+    {
+        preIdle.push_back(preNoteRestored->renderSample());
+        activeIdle.push_back(activeRestored->renderSample());
+    }
+    check(comparePcm(activeIdle,preIdle,"restored active-image idle exact-PCM"),
+          "active-image restore has no resurrected voice output");
+    // These clones receive the next note immediately at the restored boot
+    // boundary, without adding a settling second to either candidate.
+    send(*immediatePre,0,0x90,72,100);
+    send(*immediateActive,0,0x90,72,100);
+    std::vector<Sc88::SampleFrame> preImmediate, activeImmediate, silentImmediate;
+    for(size_t sample{};sample<g_sampleRate;++sample)
+    {
+        preImmediate.push_back(immediatePre->renderSample());
+        activeImmediate.push_back(immediateActive->renderSample());
+        silentImmediate.push_back(immediateSilent->renderSample());
+    }
+    check(!comparePcm(preImmediate,silentImmediate,"immediate note vs no-note"),
+          "immediate first note changes PCM");
+    check(comparePcm(activeImmediate,preImmediate,"active-image immediate-note exact-PCM"),
+          "active-image immediate first note matches pre-note reference");
+    // Diagnostic only: isolate separately the native note/voice runtime tail
+    // and the timer-decremented 33-byte panel activity block. These broad
+    // substitutions must not become production policy without writer audits.
+    const auto diagnosticNote = [&](const std::vector<uint8_t>& diagnosticImage,
+                                    const char* label)
+    {
+        auto diagnostic=std::make_unique<Sc88>(rom,waves,model,false);
+        if(Sc88Settings::restore(*diagnostic,diagnosticImage)!=Result::Success)
+            throw std::runtime_error("diagnostic history candidate rejected");
+        send(*diagnostic,0,0x90,72,100);
+        std::vector<Sc88::SampleFrame> output;
+        for(size_t sample{};sample<g_sampleRate;++sample)
+            output.push_back(diagnostic->renderSample());
+        comparePcm(output,preImmediate,label);
+    };
+    const auto timerStart = model==Model::Sc88 ? size_t{0x543c} : size_t{0x5440};
+    const auto timerEnd = model==Model::Sc88 ? size_t{0x5464} : size_t{0x5468};
+    auto noVoiceHistory=activeImage;
+    std::copy(alignedSilentImage.begin()+0xda00,alignedSilentImage.end(),
+              noVoiceHistory.begin()+0xda00);
+    auto noTimerHistory=activeImage;
+    std::copy(alignedSilentImage.begin()+timerStart,alignedSilentImage.begin()+timerEnd,
+              noTimerHistory.begin()+timerStart);
+    auto noVoiceOrTimerHistory=noVoiceHistory;
+    std::copy(alignedSilentImage.begin()+timerStart,alignedSilentImage.begin()+timerEnd,
+              noVoiceOrTimerHistory.begin()+timerStart);
+    diagnosticNote(noVoiceHistory,"diagnostic replace DA00..FFFF");
+    diagnosticNote(noTimerHistory,"diagnostic replace panel timer block");
+    diagnosticNote(noVoiceOrTimerHistory,"diagnostic replace voice and timer blocks");
+
     auto unknownRom=rom; unknownRom.back()^=1;
     auto unknown=std::make_unique<Sc88>(unknownRom,waves,model,false);
     currentPreference = 0xff;
