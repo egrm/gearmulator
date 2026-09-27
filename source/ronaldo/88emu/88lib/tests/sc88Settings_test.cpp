@@ -785,6 +785,14 @@ bool exercise(Model model, bool isolateHistory)
         auto invalidPreference=variant; invalidPreference[g_preference]=2;
         check(Sc88Settings::restore(*restored,invalidPreference)==Result::InvalidImage,
               "reject invalid C072 preference");
+        for(const uint8_t invalidGroup:{uint8_t{0},uint8_t{4},uint8_t{255}})
+        {
+            auto invalidUserGroup=variant;
+            invalidUserGroup[model==Model::Sc88?0x54d2:0x54da]=3;
+            invalidUserGroup[model==Model::Sc88?0x54d7:0x54df]=invalidGroup;
+            check(Sc88Settings::restore(*restored,invalidUserGroup)==Result::InvalidImage,
+                  "reject invalid active UserInst subgroup");
+        }
         check(restored->cycles()==originalCycles,"invalid image leaves board unrendered");
         check(Sc88ExecutionProbe::ram(*restored)==originalMemory,
               "invalid image leaves SRAM unchanged");

@@ -61,6 +61,12 @@ namespace emu88Lib
 		constexpr size_t g_sc88PanelPage = 0x54d2;
 		constexpr size_t g_sc88vlPanelPage = 0x54da;
 		constexpr uint8_t g_userInstrumentPage = 3;
+		// Native Select handlers SC 01:CF0F..CF1F / VL 01:C6AC..C6BC
+		// cycle Vibrato, Filter and Envelope through subgroup values 1..3.
+		constexpr size_t g_sc88UserGroup = 0x54d7;
+		constexpr size_t g_sc88vlUserGroup = 0x54df;
+		constexpr uint8_t g_firstUserGroup = 1;
+		constexpr uint8_t g_lastUserGroup = 3;
 		// Match the native panel gesture timing used by the Pro adapter and
 		// Sc88::runFactoryReset, allowing the scanner to consume each edge.
 		constexpr unsigned g_panelPressSamples = g_sampleRate / 10;
@@ -140,8 +146,12 @@ namespace emu88Lib
 		const auto switches = board.m_model == Model::Sc88 ? g_sc88SwitchBase : g_sc88vlSwitchBase;
 		const auto selectedIndex = board.m_model == Model::Sc88 ? g_sc88SelectedIndex : g_sc88vlSelectedIndex;
 		const auto panelPage = board.m_model == Model::Sc88 ? g_sc88PanelPage : g_sc88vlPanelPage;
+		const auto userGroup = board.m_model == Model::Sc88 ? g_sc88UserGroup : g_sc88vlUserGroup;
 		const auto savedSelection = readWord(image,selectedIndex);
 		if(savedSelection >= g_parts) return Result::InvalidImage;
+		if(image[panelPage]==g_userInstrumentPage &&
+		   (image[userGroup]<g_firstUserGroup || image[userGroup]>g_lastUserGroup))
+			return Result::InvalidImage;
 		std::array<uint8_t,g_meterCount> freshMeters{};
 		std::array<uint8_t,g_accumulatorBytes> freshAccumulator{};
 		std::array<uint8_t,g_voiceOwnerCount> freshVoiceOwners{};
@@ -175,6 +185,12 @@ namespace emu88Lib
 		{
 			pressPanel(board,buttonBit(Button::UserInst));
 			if(board.m_sram[panelPage]!=g_userInstrumentPage) return Result::InvalidImage;
+		}
+		if(image[panelPage]==g_userInstrumentPage)
+		{
+			for(unsigned move{};move<g_lastUserGroup && board.m_sram[userGroup]!=image[userGroup];++move)
+				pressPanel(board,buttonBit(Button::Select));
+			if(board.m_sram[userGroup]!=image[userGroup]) return Result::InvalidImage;
 		}
 		std::copy_n(image.begin()+g_polyPressureBase,g_parts*g_polyPressureKeys,
 		            board.m_sram.begin()+g_polyPressureBase);

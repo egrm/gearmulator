@@ -289,6 +289,20 @@ bool panelCandidate(const Sc88& board, Model model)
     // SC deferred press handler 01:A4CA and scanner 01:A4DC; VL scanner
     // 01:97CE independently tests the same bit before emitting queued keys.
     for(size_t key{};key<32;++key) if(ram[0x5030+key]&1) return false;
+    // Subgroup descriptors and title strings: SC 07:B2BC/B2EC/B30C ->
+    // BC8C/BC9C/BCAC; VL 07:D1C0/D1F0/D210 -> DD10/DD20/DD30.
+    // The scanner/UI can sleep while the old group title is still visible.
+    if(ram[model==Model::Sc88?0x54d2:0x54da]==3)
+    {
+        constexpr std::array<std::string_view,3> titles{"Vib.","Fil.","Env."};
+        const auto group=ram[model==Model::Sc88?0x54d7:0x54df];
+        if(group<1 || group>titles.size()) return false;
+        const auto& lcd=board.lcd();
+        std::string visible(lcd.getVisibleColumns()*lcd.getVisibleLines(),' ');
+        lcd.copyVisibleDdRam(visible.data());
+        if(visible.substr(3,4)!=titles[group-1]) return false;
+        if(group==2 && visible.substr(8,3)!="---") return false;
+    }
     return true;
 }
 
@@ -479,7 +493,8 @@ void tracePanelCandidate(Sc88& board, Model model)
 }
 
 bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
-                      const std::vector<uint8_t>& waves, Model model, bool userPage=false)
+                      const std::vector<uint8_t>& waves, Model model, bool userPage=false,
+                      unsigned userGroup=0)
 {
     // SC PartR C81F..C83C edits 56F2 and D2ED derives 56F0 from 07:A66E.
     // VL PartR BF6F..BF8C edits 56FC and CA56 derives 56FA from 07:C3EE.
@@ -525,10 +540,12 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
         board.setButtons(0);
         return wait(board,phase);
     };
-    const auto editButton=userPage?Button::VibRateR:Button::LevelR;
+    const auto editButton=userPage?(userGroup==1?Button::VibDepthR:Button::VibRateR):Button::LevelR;
     // Native UserInst VibRateR measurement: A1/A2/B1/B2 write these
     // separate UserInst records, not the MIDI NRPN part-record fields.
     constexpr std::array<size_t,4> userRateFields{0x87ee,0x880e,0x9cee,0x9d0e};
+    constexpr std::array<size_t,3> groupFirstField{0,2,4};
+    const auto nextField=groupFirstField.at(userGroup);
     const auto changedSettings=[&](const std::vector<uint8_t>& before,
                                 const std::vector<uint8_t>& after)
     {
@@ -536,7 +553,8 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
         if(userPage)
         {
             for(const auto address:userRateFields)
-                if(before.at(address)!=after.at(address)) parts.push_back(address);
+                if(before.at(address+nextField)!=after.at(address+nextField))
+                    parts.push_back(address+nextField);
             return parts;
         }
         for(size_t part{};part<g_partCount;++part)
@@ -601,8 +619,31 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
         if(userPage)
         {
             require(press(source,Button::UserInst,"source-UserInst"),"UserInst did not settle");
-            require(press(source,editButton,"source-saved-UserInst-edit"),
+            require(press(source,Button::VibRateR,"source-saved-UserInst-edit"),
                     "source UserInst edit did not settle");
+            for(unsigned edit{};edit<2;++edit)
+                require(press(source,Button::VibDepthR,"source-saved-depth"),
+                        "source depth edit did not settle");
+            for(unsigned edit{};edit<3;++edit)
+                require(press(source,Button::VibDelayR,"source-saved-delay"),
+                        "source delay edit did not settle");
+            // Roland's SC-88 Editing User Instruments procedure: Select cycles
+            // Vibrato, Filter, Envelope; the same three button pairs edit each.
+            require(press(source,Button::Select,"source-filter"),"filter did not settle");
+            for(unsigned edit{};edit<4;++edit)
+                require(press(source,Button::VibDepthR,"source-cutoff"),"cutoff did not settle");
+            for(unsigned edit{};edit<5;++edit)
+                require(press(source,Button::VibDelayR,"source-resonance"),"resonance did not settle");
+            require(press(source,Button::Select,"source-envelope"),"envelope did not settle");
+            for(unsigned edit{};edit<6;++edit)
+                require(press(source,Button::VibRateR,"source-attack"),"attack did not settle");
+            for(unsigned edit{};edit<7;++edit)
+                require(press(source,Button::VibDepthR,"source-decay"),"decay did not settle");
+            for(unsigned edit{};edit<8;++edit)
+                require(press(source,Button::VibDelayR,"source-release"),"release did not settle");
+            require(press(source,Button::Select,"source-vibrato"),"vibrato did not settle");
+            for(unsigned group{};group<userGroup;++group)
+                require(press(source,Button::Select,"source-saved-group"),"group did not settle");
         }
         const auto selection=slot;
         const auto groupPart=selection%g_groupPartCount+1;
@@ -611,10 +652,35 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
             static_cast<char>('0'+groupPart/10),
             static_cast<char>('0'+groupPart%10)};
         sourceLcd[slot]=visible(source);
+        if(userPage && slot==0)
+        {
+            auto later=source.cloneExecution();
+            require(bool(later),"display stability clone unavailable");
+            run(*later,g_sampleRate);
+            std::cout << "userinst-title-stability model=" << static_cast<int>(model)
+                      << " group=" << userGroup << " before=" << printable(sourceLcd[slot])
+                      << " later=" << printable(visible(*later)) << '\n';
+            check(sourceLcd[slot]==visible(*later),"UserInst display changes after candidate",0);
+            for(const auto [first,last]:std::array<std::pair<size_t,size_t>,2>{{
+                    {0x5430,0x5460},{0xf900,0xf9b0}}})
+            {
+                std::cout << "userinst-display-state model=" << static_cast<int>(model)
+                          << " group=" << userGroup;
+                for(size_t address=first;address<last;++address)
+                {
+                    const auto before=Sc88ExecutionProbe::ram(source)[address];
+                    const auto after=Sc88ExecutionProbe::ram(*later)[address];
+                    if(before!=after)
+                        std::cout << ' ' << std::hex << address << ':' << unsigned(before)
+                                  << '>' << unsigned(after) << std::dec;
+                }
+                std::cout << '\n';
+            }
+        }
         require(Sc88Settings::capture(source,images[slot])==Sc88Settings::Result::Success &&
                 images[slot].size()==Sc88::SramSize,"source panel image capture failed");
         const auto before=Sc88ExecutionProbe::ram(source);
-        if(userPage && slot==0)
+        if(userPage && slot==0 && userGroup==0)
         {
             auto bootImage=images[slot];
             bootImage[g_batteryPreference]=g_preserve;
@@ -653,9 +719,17 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
         if(userPage)
         {
             const auto expected=userRateFields[(slot/g_groupPartCount)*2+slot%g_groupPartCount];
-            check(before[expected]==65 && Sc88ExecutionProbe::ram(source)[expected]==66 &&
-                  sourceTargets[slot]==std::vector<size_t>{expected},
+            std::cout << "userinst-saved-fields address=" << std::hex << expected << std::dec;
+            for(size_t field{};field<8;++field) std::cout << ' ' << unsigned(before[expected+field]);
+            std::cout << '\n';
+            constexpr std::array<uint8_t,8> values{65,66,68,69,70,71,72,67};
+            check(before[expected+nextField]==values[nextField] &&
+                  Sc88ExecutionProbe::ram(source)[expected+nextField]==values[nextField]+1 &&
+                  sourceTargets[slot]==std::vector<size_t>{expected+nextField},
                   "native UserInst saved/next edits miss measured target",0);
+            for(size_t field{};field<values.size();++field)
+                check(before[expected+field]==values[field],
+                      "native UserInst control did not reach distinct saved value",0);
         }
     }
     for(uint8_t preference : {uint8_t{0},uint8_t{1}})
@@ -686,7 +760,9 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
                   "selected LCD context lost",preference);
             if(userPage)
                 for(const auto address:userRateFields)
-                    check(before[address]==variant[address],"UserInst setting lost",preference);
+                    for(size_t field{};field<8;++field)
+                        check(before[address+field]==variant[address+field],
+                              "UserInst setting lost",preference);
             const auto ready=wait(*restored,"restored-before-edit");
             check(ready,"restored panel candidate did not settle",preference);
             if(!ready) continue;
@@ -703,9 +779,10 @@ bool tracePanelRecall(Sc88& live, const std::vector<uint8_t>& rom,
             if(userPage)
             {
                 for(const auto address:userRateFields)
-                    check(Sc88ExecutionProbe::ram(*restored)[address]==
-                          Sc88ExecutionProbe::ram(*sources[slot])[address],
-                          "next UserInst value differs",preference);
+                    for(size_t field{};field<8;++field)
+                        check(Sc88ExecutionProbe::ram(*restored)[address+field]==
+                              Sc88ExecutionProbe::ram(*sources[slot])[address+field],
+                              "next UserInst value differs",preference);
                 check(visible(*restored)==visible(*sources[slot]),
                       "next UserInst LCD differs",preference);
             }
@@ -737,7 +814,12 @@ bool exercise(Model model, std::string_view mode)
     if(mode=="--panel-recall")
         return tracePanelRecall(*live,rom,waves,model);
     if(mode=="--userinst-recall")
-        return tracePanelRecall(*live,rom,waves,model,true);
+    {
+        bool passed=true;
+        for(unsigned group{};group<3;++group)
+            passed=tracePanelRecall(*live,rom,waves,model,true,group) && passed;
+        return passed;
+    }
     if(mode=="--idle-pc")
     {
         std::map<uint32_t,size_t> frequency;
