@@ -29,6 +29,8 @@ namespace
     constexpr std::array<size_t,3> envelopeOffsets{0x0a,0x0b,0x0c};
     constexpr uint8_t envelopeGroup = 3;
     constexpr uint8_t drySend = 0;
+    // Four native InstR presses select GM's first electric piano from program zero.
+    constexpr uint8_t electricPianoProgram = 4;
 
     void render(emu88Player::Processor& processor, int frames, juce::MidiBuffer midi = {})
     {
@@ -107,6 +109,7 @@ namespace
         CHECK(selectedPart(actual.memory, actual.model) == part);
         const auto primary = primaryBase(part);
         const auto secondary = secondaryBase(part);
+        CHECK(actual.memory.at(primary) == expected.memory.at(primary));
         CHECK(actual.memory.at(primary + 1) == expected.memory.at(primary + 1));
         for(const auto offset : envelopeOffsets)
             CHECK(actual.memory.at(secondary + offset) == expected.memory.at(secondary + offset));
@@ -139,8 +142,9 @@ int main()
         const auto primary = primaryBase(part);
         const auto secondary = secondaryBase(part);
 
-        press(source, emu88Lib::Button::InstR);
-        CHECK(hardware(save(source)).memory.at(primary + 1) != initial.memory.at(primary + 1));
+        for(uint8_t step{}; step < electricPianoProgram; ++step)
+            press(source, emu88Lib::Button::InstR);
+        CHECK_EQ(hardware(save(source)).memory.at(primary + 1), electricPianoProgram);
         press(source, emu88Lib::Button::ReverbR);
         CHECK(hardware(save(source)).memory.at(primary + reverbSendOffset) !=
               initial.memory.at(primary + reverbSendOffset));

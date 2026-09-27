@@ -264,7 +264,7 @@ namespace hostRecallTest
 			const auto send = sc88HardwareByte(seed, primary + 0x0f);
 			require(seedKind == "producer-dry" ? send == 0 : send != 0,
 				"Native producer seed has the requested dry or wet reverb send");
-			for(const auto address : {primary + 1, primary + 0x0f,
+			for(const auto address : {primary, primary + 1, primary + 0x0f,
 				secondary + 0x0a, secondary + 0x0b, secondary + 0x0c})
 				require(sc88HardwareByte(actual, address) == sc88HardwareByte(seed, address),
 					description);
@@ -617,6 +617,57 @@ namespace hostRecallTest
 		auto defaults = create(manager, description);
 		const auto defaultAudio = render(*defaults, notes, auditionBlocks);
 		require(firstAudio != defaultAudio, "Restored settings audibly differ from factory defaults");
+		if(seedKind == "producer-wet" || seedKind == "producer-dry")
+		{
+			const auto otherKind = seedKind == "producer-wet" ? String("producer-dry") : String("producer-wet");
+			const auto otherPath = nativeComponentPath.replace(seedKind, otherKind);
+			MemoryBlock otherNative;
+			require(otherPath != nativeComponentPath && File(otherPath).loadFileAsData(otherNative),
+				"Read paired native wet/dry producer component");
+			XmlElement wrapper("VST3PluginState");
+			wrapper.createNewChildElement("IComponent")->addTextElement(otherNative.toBase64Encoding());
+			MemoryBlock wrapped;
+			AudioProcessor::copyXmlToBinary(wrapper, wrapped);
+			auto otherSource = create(manager, description);
+			otherSource->setStateInformation(wrapped.getData(), static_cast<int>(wrapped.getSize()));
+			(void)render(*otherSource, {}, 1);
+			const auto otherState = save(*otherSource);
+			requireModel(otherState, expectedModel);
+			requireSc88NativeSeed(componentStateFromHost(otherState), otherNative,
+				expectedModel, otherKind, "Paired producer sound survives VST3 capture");
+			const auto thisComponent = componentStateFromHost(saved);
+			const auto otherComponent = componentStateFromHost(otherState);
+			const auto part = sc88SelectedPart(thisComponent, expectedModel);
+			require(sc88SelectedPart(otherComponent, expectedModel) == part,
+				"Wet and dry producer states select the same internal part");
+			const auto primary = (part < sc88PartsPerGroup ? sc88FirstGroupBase : sc88SecondGroupBase) +
+				(part % sc88PartsPerGroup) * sc88PartRecordBytes;
+			const auto secondary = (part < sc88PartsPerGroup ? size_t{0x87c8} : size_t{0x9cc8}) +
+				(part % sc88PartsPerGroup) * size_t{0x20};
+			for(const auto address : {primary, primary + 1, secondary + 0x0a,
+				secondary + 0x0b, secondary + 0x0c})
+				require(sc88HardwareByte(thisComponent, address) ==
+					sc88HardwareByte(otherComponent, address),
+					"Wet and dry producer states retain identical preset and envelope bytes");
+			auto thisSound = create(manager, description);
+			thisSound->setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
+			auto otherSound = create(manager, description);
+			otherSound->setStateInformation(otherState.getData(), static_cast<int>(otherState.getSize()));
+			(void)render(*thisSound, auditionNotes(), auditionBlocks / 2);
+			(void)render(*otherSound, auditionNotes(), auditionBlocks / 2);
+			MidiBuffer noteOff;
+			noteOff.addEvent(MidiMessage::noteOff(1, 60), 0);
+			const auto thisTail = render(*thisSound, noteOff, auditionBlocks * 2);
+			const auto otherTail = render(*otherSound, noteOff, auditionBlocks * 2);
+			float maximumDelta{};
+			for(size_t sample{}; sample < thisTail.size(); ++sample)
+				maximumDelta = std::max(maximumDelta, std::abs(thisTail[sample] - otherTail[sample]));
+			Logger::writeToLog("Producer wet/dry post-note tail maximum delta=" + String(maximumDelta, 9));
+			require(maximumDelta > 0.f, "Native reverb send zero changes actual VST3 note-off tail");
+			thisSound->releaseResources();
+			otherSound->releaseResources();
+			otherSource->releaseResources();
+		}
 		const auto beforeIndependentEdit = save(*duplicate);
 		MidiBuffer independentEdit;
 		independentEdit.addEvent(MidiMessage::controllerEvent(1, 7, 0), 0);
