@@ -578,6 +578,68 @@ bool exercise(Model model, bool isolateHistory)
             switchesStillOn += (Sc88ExecutionProbe::ram(*switchRestored)[switches+2*part]&0xe0)!=0;
         check(switchesStillOn==0,"native pedal-off clears all restored switch masks");
         std::cout << "pedal-switch still-on-after-native-off=" << switchesStillOn << '\n';
+        // Native RPN data handlers SC 3484/3493/34B3 and VL 3562/3571/3591.
+        auto tuningSource=live->cloneExecution();
+        if(!tuningSource) throw std::runtime_error("tuning source clone failed");
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto port=static_cast<uint8_t>(part/g_groupSize);
+            const auto status=static_cast<uint8_t>(0xb0 | (part%g_groupSize));
+            send(*tuningSource,port,status,101,0);
+            for(const auto [parameter,value] : std::array<std::pair<uint8_t,uint8_t>,3>{
+                    std::pair<uint8_t,uint8_t>{0,12},{2,69},{1,70}})
+            {
+                send(*tuningSource,port,status,100,parameter);
+                send(*tuningSource,port,status,6,value);
+            }
+            send(*tuningSource,port,status,38,37);
+        }
+        run(*tuningSource,g_drainSamples);
+        std::vector<uint8_t> tuningImage;
+        check(Sc88Settings::capture(*tuningSource,tuningImage)==Result::Success,
+              "capture native RPN tuning image");
+        auto tuningRestored=std::make_unique<Sc88>(rom,waves,model,false);
+        check(Sc88Settings::restore(*tuningRestored,tuningImage)==Result::Success,
+              "restore native RPN tuning image");
+        size_t tuningNativeMismatch{}, tuningLost{};
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto base=(part<g_groupSize?size_t{0x8088}:size_t{0x9588})+
+                            (part%g_groupSize)*0x70;
+            const std::array<std::pair<size_t,uint8_t>,6> fields{{
+                {0xd7a0+2*part,0x23},{0xd7a1+2*part,37},{0xd7e0+2*part,5},
+                {base+0x2b,6},{base+0x37,37},{base+0x34,76}}};
+            for(const auto [address,expected] : fields)
+            {
+                tuningNativeMismatch += tuningImage.at(address)!=expected;
+                tuningLost += Sc88ExecutionProbe::ram(*tuningRestored)[address]!=tuningImage.at(address);
+            }
+        }
+        std::cout << "RPN-tuning native-mismatches=" << tuningNativeMismatch
+                  << " lost-on-restore=" << tuningLost << '\n';
+        check(tuningNativeMismatch==0,"native RPN writes all mapped tuning fields");
+        check(tuningLost==0,"restore native RPN tuning fields");
+        // No selector resend: the next MSB must retain the saved fine-tune LSB.
+        for(size_t part{};part<g_partCount;++part)
+            for(auto* board : {tuningSource.get(),tuningRestored.get()})
+                send(*board,static_cast<uint8_t>(part/g_groupSize),
+                     static_cast<uint8_t>(0xb0 | (part%g_groupSize)),6,71);
+        run(*tuningSource,g_drainSamples);
+        run(*tuningRestored,g_drainSamples);
+        size_t continuationMismatch{};
+        for(size_t part{};part<g_partCount;++part)
+        {
+            const auto base=(part<g_groupSize?size_t{0x8088}:size_t{0x9588})+
+                            (part%g_groupSize)*0x70;
+            const std::array<std::pair<size_t,uint8_t>,4> expectedFields{{
+                {0xd7a0+2*part,0x23},{0xd7a1+2*part,0xa5},
+                {base+0x2b,7},{base+0x37,37}}};
+            for(const auto [address,expected] : expectedFields)
+                for(const auto* board : {tuningSource.get(),tuningRestored.get()})
+                    continuationMismatch += Sc88ExecutionProbe::ram(*board)[address]!=expected;
+        }
+        std::cout << "RPN-tuning next-data-entry-mismatches=" << continuationMismatch << '\n';
+        check(continuationMismatch==0,"next native RPN data entry preserves selector and saved LSB");
     }
     if(!isolateHistory) for(uint8_t savedPreference : {uint8_t{0},uint8_t{1}})
     {

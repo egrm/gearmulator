@@ -61,6 +61,13 @@ namespace emu88Lib
 		constexpr unsigned g_panelPressSamples = g_sampleRate / 10;
 		constexpr unsigned g_panelReleaseSamples = g_sampleRate / 4;
 		constexpr size_t g_partStride = sizeof(uint16_t); // R3 is doubled part index.
+		// Native part-record bases/stride from SC 01:0A64 and VL 01:0B30.
+		constexpr std::array<size_t,2> g_partRecordBases{0x8088,0x9588};
+		constexpr size_t g_partsPerGroup = g_parts / g_partRecordBases.size();
+		constexpr size_t g_partRecordStride = 0x70;
+		// RPN fine-tuning MSB/LSB mirrors written by SC 3493/326F and
+		// VL 3571/3340. Boot resets them independently of retained settings.
+		constexpr std::array<size_t,2> g_fineTuneMirrors{0x2b,0x37};
 		constexpr auto g_byteBits = std::numeric_limits<uint8_t>::digits;
 		// SC-88 handlers 30EC..326E and VL 31BD..333F. Controller values are
 		// per-part receiver state; part-record volume/pan/send settings are already
@@ -68,7 +75,9 @@ namespace emu88Lib
 		constexpr std::array g_receiverBytes{
 			0xd6a0, 0xd660, 0xd661, 0xd6a1, 0xd6e0, 0xd6e1,
 			0xd720, 0xd721, 0xd760, 0xd761, 0xd820, 0xd860,
-			0xd861, 0xd8a0, 0xd8e0, 0xd8e1, 0xd920, 0xd921};
+			0xd861, 0xd8a0, 0xd8e0, 0xd8e1, 0xd920, 0xd921,
+			// RPN fine word and coarse byte: SC 3493/34B3, VL 3571/3591.
+			0xd7a0, 0xd7a1, 0xd7e0};
 		// The six MIDI writers OR their recalculation source masks into these
 		// dirty targets. Both ROMs independently use the same pairs:
 		// SC-88 30C4/30EC/3108/318B/313B/3150 and
@@ -153,6 +162,10 @@ namespace emu88Lib
 				(image[switches+stride] & g_switchMask));
 			for(const auto address : g_receiverBytes)
 				board.m_sram[address + stride] = image[address + stride];
+			const auto partBase = g_partRecordBases[part/g_partsPerGroup] +
+			                      (part%g_partsPerGroup)*g_partRecordStride;
+			for(const auto offset : g_fineTuneMirrors)
+				board.m_sram[partBase+offset] = image[partBase+offset];
 			for(const auto& [source, target] : g_dirtyMasks)
 			{
 				const auto value = readWord(board.m_sram, source + stride) |
